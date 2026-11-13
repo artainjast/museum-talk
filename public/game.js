@@ -1,4 +1,4 @@
-import { MAP_W, MAP_H, RW, RH, rooms, doors, exhibits, zoneRect, tileAt, roomAt, doorRoomAt, isWalkable, exDist } from './map.js';
+import { MAP_W, MAP_H, RW, RH, rooms, doors, exhibits, zoneRect, tileAt, roomAt, doorRoomAt, blockRoomAt, isWalkable, exDist } from './map.js';
 import { UI, EXTRA, AVATARS, AVATAR_SPRITES, REACTIONS, ROOM_TITLES, EXHIBITS, SCENARIOS, VOTE_FINAL, HELP_KEYS } from './content.js';
 
 // ---------------------------------------------------------------- utils
@@ -17,15 +17,18 @@ const store = {
 const now = () => performance.now();
 
 // ---------------------------------------------------------------- role
-// Phase A: the page is always the guide (solo).
-const role = 'solo';
-const isGuide = true;
+// /?solo=1 (or no Socket.IO script) -> local guide only; /?host=TOKEN -> guide synced to server; else visitor.
+const params = new URLSearchParams(location.search);
+const hasIO = typeof window.io === 'function';
+const role = (params.get('solo') === '1' || !hasIO) ? 'solo' : params.has('host') ? 'host' : 'visitor';
+const isGuide = role !== 'visitor';
 document.body.classList.add(role);
 
 // ---------------------------------------------------------------- state
 const S = {
   guide: { x: rooms[0].spawn.x, y: rooms[0].spawn.y, rx: 0, ry: 0, face: 1 },
   unlocked: 0,
+  discovered: 0, // highest room the guide has walked into (fog of war)
   spotlight: null,
   vote: { idx: -1, endsAt: 0, revealed: false, counts: [0, 0] }, // endsAt in performance.now() ms
   players: new Map(),  // visitor avatars (phase B)
@@ -37,18 +40,26 @@ if (isGuide) {
   const saved = store.get('museum.guide');
   if (saved && Number.isInteger(saved.x) && Number.isInteger(saved.unlocked) && isWalkable(saved.x, saved.y, saved.unlocked)) {
     S.guide.x = saved.x; S.guide.y = saved.y; S.unlocked = saved.unlocked;
+    S.discovered = Number.isInteger(saved.discovered) ? Math.min(saved.discovered, saved.unlocked) : 0;
   }
 }
 S.guide.rx = S.guide.x; S.guide.ry = S.guide.y;
-const saveGuide = () => store.set('museum.guide', { x: S.guide.x, y: S.guide.y, unlocked: S.unlocked });
+const FOG_MAX = .62; // undiscovered rooms are shadowed, not black
+const light = rooms.map(r => (r.i <= S.discovered ? 1 : 0));
+const saveGuide = () => store.set('museum.guide', { x: S.guide.x, y: S.guide.y, unlocked: S.unlocked, discovered: S.discovered });
 
 // ---------------------------------------------------------------- sprites
-const SPR = {};
+// Single-frame sprites, plus optional walk sheets: 5 cols (idle + 4 walk frames) x 3 rows (down, up, side-right), 128px cells.
+const SPR = {}, SHEET = {};
+const loadImg = src => { const img = new Image(); img.onload = () => { img.ok = true; }; img.src = src; return img; };
 for (const name of [...AVATAR_SPRITES, 'guide']) {
-  const img = new Image();
-  img.onload = () => { img.ok = true; };
-  img.src = `/sprites/${name}.png`;
-  SPR[name] = img;
+  SPR[name] = loadImg(`/sprites/${name}.png`);
+  SHEET[name] = loadImg(`/sprites/${name}_walk.png`);
+}
+// Facing from a step: dir 0 = down, 1 = up, 2 = side (face: 1 right, -1 left).
+function setFacing(a, dx, dy) {
+  if (dx) { a.dir = 2; a.face = dx > 0 ? 1 : -1; }
+  else if (dy) a.dir = dy > 0 ? 0 : 1;
 }
 const AV_COLORS = ['#8e7cc3', '#4a7bd0', '#1f9e8f', '#d64545', '#d04f9a', '#5aa04a', '#5bb3e0', '#2f7a3f', '#e0735b', '#334'];
 
@@ -74,25 +85,27 @@ addEventListener('resize', resize);
 resize();
 
 // ---------------------------------------------------------------- world text (HTML, positioned in world px)
-function addWorldText(x, y, w, h, cls, html, id) {
+const worldTexts = [];
+function addWorldText(room, x, y, w, h, cls, html, id) {
   const d = document.createElement('div');
   d.className = 'wt ' + cls;
   if (id) d.id = id;
   Object.assign(d.style, { left: x * T + 'px', top: y * T + 'px', width: w * T + 'px', height: h * T + 'px' });
   d.innerHTML = html;
   world.appendChild(d);
+  worldTexts.push({ el: d, room });
   return d;
 }
 {
   const r0 = rooms[0], r6 = rooms[6], sign = EXHIBITS['lobby.sign'];
-  addWorldText(r0.x0 + 3, r0.y0 + 2, 16, 3, 'wt-title', `${esc(sign.title)}<small dir="ltr">${esc(sign.sub)}</small>`);
+  addWorldText(0, r0.x0 + 3, r0.y0 + 2, 16, 3, 'wt-title', `${esc(sign.title)}<small dir="ltr">${esc(sign.sub)}</small>`);
   for (const k of ['h', 'a']) {
     const z = zoneRect[k];
     const [emoji, ...rest] = (k === 'h' ? UI.voteHuman : UI.voteAgent).split(' ');
-    addWorldText(z.x0, z.y0, z.x1 - z.x0 + 1, z.y1 - z.y0 + 1, 'wt-zone', `<b>${emoji}</b><span>${esc(rest.join(' '))}</span><span class="zc"></span>`, 'zone-' + k);
+    addWorldText(3, z.x0, z.y0, z.x1 - z.x0 + 1, z.y1 - z.y0 + 1, 'wt-zone', `<b>${emoji}</b><span>${esc(rest.join(' '))}</span><span class="zc"></span>`, 'zone-' + k);
   }
-  addWorldText(r6.x0 + 1, r6.y0 + 3, 20, 3, 'wt-quote', esc(EXHIBITS['r6.quote'].text));
-  addWorldText(r6.x0 + 3, r6.y0 + 7, 16, 2, 'wt-qa', esc(EXHIBITS['r6.qa'].text));
+  addWorldText(6, r6.x0 + 1, r6.y0 + 3, 20, 3, 'wt-quote', esc(EXHIBITS['r6.quote'].text));
+  addWorldText(6, r6.x0 + 3, r6.y0 + 7, 16, 2, 'wt-qa', esc(EXHIBITS['r6.qa'].text));
 }
 
 // ---------------------------------------------------------------- drawing
@@ -161,6 +174,12 @@ function drawGround(nearId) {
     drawFrame(c, e, e.id === nearId);
   }
   // velvet ropes on locked doors
+  // fog of war over rooms the guide hasn't discovered yet
+  for (const r of rooms) {
+    if (light[r.i] > .995) continue;
+    c.fillStyle = `rgba(11,10,16,${(1 - light[r.i]) * FOG_MAX})`;
+    c.fillRect(r.ox * T, r.oy * T, RW * T + .5, RH * T + .5);
+  }
   for (const d of doors) if (d.room > S.unlocked) drawRope(c, d);
 }
 
@@ -219,10 +238,19 @@ function drawActor(c, a, t, opts) {
     c.strokeStyle = '#19d3f0'; c.lineWidth = 3;
     c.beginPath(); c.ellipse(cx, feet, T * .52 + Math.sin(t / 250) * 2, T * .2, 0, 0, Math.PI * 2); c.stroke();
   }
-  const img = opts.guide ? SPR.guide : SPR[AVATAR_SPRITES[a.avatar]];
+  const sname = opts.guide ? 'guide' : AVATAR_SPRITES[a.avatar];
+  const img = SPR[sname], sheet = SHEET[sname];
   const D = opts.guide ? GUIDE_D : SPR_D;
   let headY;
-  if (img && img.ok) {
+  if (sheet && sheet.ok) {
+    const row = a.dir || 0;
+    const col = moving ? 1 + (Math.floor(t / 120 + (a.phase || 0)) % 4) : 0;
+    c.save();
+    if (row === 2 && a.face < 0) { c.translate(cx, 0); c.scale(-1, 1); c.translate(-cx, 0); }
+    c.drawImage(sheet, col * 128, row * 128, 128, 128, cx - D / 2, feet - D * (124 / 128), D, D);
+    c.restore();
+    headY = feet - D * (opts.guide ? .93 : .78);
+  } else if (img && img.ok) {
     c.save();
     if (a.face < 0) { c.translate(cx, 0); c.scale(-1, 1); c.translate(-cx, 0); }
     c.drawImage(img, cx - D / 2, feet - D * (124 / 128) - bob, D, D);
@@ -284,6 +312,11 @@ function drawActors(t) {
   }
   list.push(S.guide);
   list.sort((a, b) => a.ry - b.ry);
+  if (tapMark && tapMark.until > t) {
+    const k = (tapMark.until - t) / 900;
+    c.strokeStyle = `rgba(25,211,240,${k})`; c.lineWidth = 3;
+    c.beginPath(); c.ellipse((tapMark.x + .5) * T, (tapMark.y + .6) * T, T * (.5 - k * .2), T * (.22 - k * .08), 0, 0, Math.PI * 2); c.stroke();
+  }
   for (const a of list) {
     if (a === S.guide) { drawActor(c, a, t, { guide: true, label: UI.guide }); continue; }
     const isMe = a === me;
@@ -343,8 +376,10 @@ function nearestInRoom() {
   }
   return best;
 }
-function updatePlaque() {
-  const e = nearestExhibit(S.guide.x, S.guide.y);
+function updatePlaque(t) {
+  const meP = S.me != null ? S.players.get(S.me) : null;
+  const f = (meP && t < manualUntil) ? meP : S.guide;
+  const e = nearestExhibit(f.x, f.y);
   const id = e ? e.id : null;
   if (id === nearId) return;
   nearId = id;
@@ -400,7 +435,13 @@ function renderVote(t) {
   const v = S.vote, p = $('vote');
   const show = v.idx >= 0 && S.room === 3;
   p.hidden = !show;
-  document.body.classList.toggle('voting', show && voteOpen(t));
+  const open = show && voteOpen(t);
+  document.body.classList.toggle('voting', open);
+  if (role === 'visitor') {
+    const vb = $('voteBtns');
+    vb.hidden = !(open && joined);
+    for (const b of vb.children) b.classList.toggle('on', b.dataset.v === myVote);
+  }
   if (!show) { lastVoteKey = ''; return; }
   const left = Math.max(0, Math.ceil((v.endsAt - t) / 1000));
   const key = `${v.idx}|${left}|${v.revealed}|${v.counts}`;
@@ -423,11 +464,18 @@ function renderVote(t) {
 const voteOpen = t => S.vote.idx >= 0 && !S.vote.revealed && S.vote.endsAt > t;
 
 // ---------------------------------------------------------------- guide actions
-function hostSend() { /* phase B: sync to server */ }
+let sock = null;
+const hostState = () => ({
+  x: S.guide.x, y: S.guide.y, unlocked: S.unlocked, discovered: S.discovered, spotlight: S.spotlight,
+  vote: { idx: S.vote.idx, remaining: Math.max(0, Math.round(S.vote.endsAt - now())), revealed: S.vote.revealed },
+});
+function hostSend() {
+  if (role === 'host' && sock && sock.connected) sock.emit('host:state', hostState());
+}
 
 function moveGuide(dx, dy) {
   const g = S.guide;
-  if (dx) g.face = dx;
+  setFacing(g, dx, dy);
   const nx = g.x + dx, ny = g.y + dy;
   if (!isWalkable(nx, ny, S.unlocked)) return;
   g.x = nx; g.y = ny;
@@ -444,6 +492,7 @@ function teleport(i) {
 }
 function setUnlocked(n) {
   S.unlocked = Math.max(0, Math.min(rooms.length - 1, n));
+  S.discovered = Math.max(Math.min(S.discovered, S.unlocked), roomAt(S.guide.x, S.guide.y));
   saveGuide();
   hostSend('unlock');
 }
@@ -462,6 +511,7 @@ function resetAll() {
   setVote({ idx: -1, endsAt: 0, revealed: false });
   setSpotlight(null);
   S.unlocked = 0;
+  S.discovered = 0;
   teleport(0);
   setUnlocked(0);
 }
@@ -518,8 +568,208 @@ addEventListener('keydown', ev => {
       default:
         if (ev.shiftKey && /^Digit[0-6]$/.test(code)) teleport(Number(code[5]));
     }
+  } else {
+    if (DIRS[code]) {
+      if (!ev.repeat && !held.includes(code) && joined) {
+        held.push(code);
+        visitorStep(...DIRS[code]);
+        nextStep = now() + STEP_MS * 1.6;
+      }
+      return;
+    }
+    if (ev.repeat) return;
+    const m = /^(?:Digit|Numpad)([1-5])$/.exec(code);
+    if (m && joined) react(Number(m[1]) - 1);
+    else if (code === 'KeyZ') { zoomOut = !zoomOut; computeZoom(); }
+    else if (code === 'Escape') { if (cardId) closeCard(); else if (S.spotlight) closeOverlay('spot'); }
   }
 });
+
+// ---------------------------------------------------------------- networking (phase B)
+let joined = false, myVote = null, lastReactAt = 0;
+let manualUntil = 0, tapMark = null;
+const MANUAL_MS = 8000; // must match server: after this idle time the avatar follows the guide again
+function visitorStep(dx, dy) {
+  if (!sock || !joined) return;
+  manualUntil = now() + MANUAL_MS;
+  sock.emit('step', [dx, dy]);
+}
+function visitorGoto(x, y) {
+  if (!sock || !joined) return;
+  manualUntil = now() + MANUAL_MS + 4000;
+  tapMark = { x, y, until: now() + 900 };
+  sock.emit('goto', [x, y]);
+}
+const SESSION_KEY = 'museum.session';
+let session = store.get(SESSION_KEY);
+
+function setOnline(n) {
+  const el = $('online');
+  el.textContent = fmt(UI.online, { n: fa(n) });
+  el.hidden = role === 'solo';
+}
+function upsertPlayer([id, x, y, avatar, name]) {
+  const old = S.players.get(id);
+  if (old) Object.assign(old, { avatar, name });
+  else S.players.set(id, { id, x, y, rx: x, ry: y, avatar, name, face: 1, dir: 0, phase: Math.random() * 4, react: null });
+}
+function applyMeta(m) {
+  if (role === 'visitor') {
+    S.unlocked = m.unlocked;
+    S.discovered = m.discovered ?? S.discovered;
+    if (m.spotlight !== S.spotlight) { S.spotlight = m.spotlight; spotDismissed = null; renderSpot(); }
+    if (m.vote.idx !== S.vote.idx) myVote = null;
+    S.vote = { idx: m.vote.idx, endsAt: now() + m.vote.remaining, revealed: m.vote.revealed, counts: m.vote.counts };
+  } else if (m.vote.idx === S.vote.idx) {
+    S.vote.counts = m.vote.counts;
+  }
+}
+function applySnap(m) {
+  S.players.clear();
+  for (const row of m.players) upsertPlayer(row);
+  if (role === 'visitor') { S.guide.x = S.guide.rx = m.g[0]; S.guide.y = S.guide.ry = m.g[1]; cam.init = false; }
+  applyMeta(m.meta);
+  for (const rm of rooms) light[rm.i] = rm.i <= S.discovered ? 1 : 0;
+  setOnline(m.n);
+}
+function react(i) {
+  const t = now();
+  if (!sock || t - lastReactAt < 1000) return;
+  lastReactAt = t;
+  sock.emit('react', i);
+}
+function castVote(v) {
+  if (!sock || !voteOpen(now())) return;
+  myVote = v;
+  sock.emit('vote', v);
+  lastVoteKey = '';
+}
+const newSessionId = () => 's' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+
+function sendJoin() { if (sock && sock.connected && joined) sock.emit('join', session); }
+
+function setupJoin() {
+  $('joinTitle').textContent = EXHIBITS['lobby.sign'].title;
+  $('avatarLabel').textContent = UI.avatarLabel;
+  $('nameLabel').textContent = UI.nameLabel;
+  $('joinBtn').textContent = UI.join;
+  let avatar = session && Number.isInteger(session.avatar) ? session.avatar : (Math.random() * 10) | 0;
+  const box = $('avatars');
+  AVATARS.forEach((e, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.i = i;
+    const img = new Image();
+    img.alt = e;
+    img.src = `/sprites/${AVATAR_SPRITES[i]}.png`;
+    img.onerror = () => { b.textContent = e; };
+    b.appendChild(img);
+    b.addEventListener('click', () => { avatar = i; for (const x of box.children) x.classList.toggle('on', x === b); });
+    if (i === avatar) b.classList.add('on');
+    box.appendChild(b);
+  });
+  if (session?.name) $('nameInput').value = session.name;
+  $('join').addEventListener('submit', ev => {
+    ev.preventDefault();
+    session = { sessionId: session?.sessionId || newSessionId(), name: $('nameInput').value.trim().slice(0, 16), avatar };
+    store.set(SESSION_KEY, session);
+    $('join').hidden = true;
+    startVisitor();
+  });
+  $('join').hidden = false;
+}
+
+function startVisitor() {
+  joined = true;
+  $('bar').hidden = false;
+  sendJoin();
+  const h = $('hint');
+  h.textContent = EXTRA.moveHint;
+  h.classList.add('show');
+  setTimeout(() => h.classList.remove('show'), 9000);
+}
+$('stage').addEventListener('pointerup', ev => {
+  if (role !== 'visitor' || !joined) return;
+  const wx = (ev.clientX - vw / 2) / zoom + cam.x, wy = (ev.clientY - vh / 2) / zoom + cam.y;
+  const x = Math.floor(wx / T), y = Math.floor(wy / T);
+  if (isWalkable(x, y, S.unlocked) && blockRoomAt(x, y) <= S.discovered) visitorGoto(x, y);
+});
+
+function setupBar() {
+  REACTIONS.forEach((e, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = e;
+    b.addEventListener('click', () => react(i));
+    $('reacts').appendChild(b);
+  });
+  const [bh, ba] = $('voteBtns').children;
+  bh.textContent = UI.voteHuman; ba.textContent = UI.voteAgent;
+  bh.addEventListener('click', () => castVote('h'));
+  ba.addEventListener('click', () => castVote('a'));
+}
+
+if (role !== 'solo') {
+  sock = window.io({ reconnectionDelayMax: 4000 });
+  let everConnected = false;
+  const rc = $('reconnect');
+  rc.textContent = UI.reconnecting;
+  setTimeout(() => { if (!sock.connected) rc.hidden = false; }, 2500);
+
+  sock.on('connect', () => {
+    everConnected = true;
+    rc.hidden = true;
+    if (role === 'host') sock.emit('host:hello', { token: params.get('host'), state: hostState() });
+    else sendJoin();
+  });
+  sock.on('disconnect', () => { rc.hidden = false; });
+  sock.on('host:denied', () => { rc.textContent = 'HOST TOKEN ✗'; rc.hidden = false; });
+  sock.on('host:ok', m => { applySnap(m); });
+  sock.on('welcome', m => {
+    S.me = m.me;
+    session = { ...session, sessionId: m.sessionId, name: m.name };
+    store.set(SESSION_KEY, session);
+    applySnap(m);
+  });
+  sock.on('snap', applySnap);
+  sock.on('meta', applyMeta);
+  sock.on('c', counts => { S.vote.counts = counts; });
+  sock.on('pjoin', upsertPlayer);
+  sock.on('pleave', id => { S.players.delete(id); });
+  sock.on('r', ([id, i]) => {
+    const p = S.players.get(id);
+    if (p) p.react = { e: REACTIONS[i], until: now() + 2000 };
+  });
+  sock.on('t', m => {
+    if (m.g && role === 'visitor') {
+      const [x, y] = m.g;
+      setFacing(S.guide, Math.sign(x - S.guide.x), Math.sign(y - S.guide.y));
+      S.guide.x = x; S.guide.y = y;
+    }
+    if (m.p) {
+      for (let i = 0; i < m.p.length; i += 3) {
+        const p = S.players.get(m.p[i]);
+        if (!p) continue;
+        const x = m.p[i + 1], y = m.p[i + 2];
+        setFacing(p, Math.sign(x - p.x), Math.sign(y - p.y));
+        p.x = x; p.y = y;
+      }
+    }
+    if (m.n !== undefined) setOnline(m.n);
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && sock.connected) {
+      if (role === 'host') sock.emit('host:state', hostState());
+      sock.emit('sync');
+    }
+  });
+
+  if (role === 'visitor') {
+    setupBar();
+    if (session?.sessionId) startVisitor();
+    else setupJoin();
+  }
+}
 addEventListener('keyup', ev => { held = held.filter(c => c !== ev.code); });
 addEventListener('blur', () => { held = []; });
 
@@ -531,9 +781,10 @@ function frame() {
   last = t;
 
   // guide stepping (local guide only)
-  if (isGuide && held.length && t >= nextStep && !S.spotlight) {
+  if (held.length && t >= nextStep) {
     const [dx, dy] = DIRS[held[held.length - 1]];
-    moveGuide(dx, dy);
+    if (isGuide) { if (!S.spotlight) moveGuide(dx, dy); }
+    else visitorStep(dx, dy);
     nextStep = t + STEP_MS;
   }
 
@@ -549,17 +800,29 @@ function frame() {
   // room change
   const r = roomAt(S.guide.x, S.guide.y);
   if (r >= 0 && r !== S.room) { S.room = r; showBanner(r); }
+  if (isGuide && r > S.discovered) { S.discovered = r; saveGuide(); hostSend(); }
+
+  // fog of war fade
+  const kl = 1 - Math.exp(-dt * 2.5);
+  for (const rm of rooms) {
+    const target = rm.i <= S.discovered ? 1 : 0;
+    light[rm.i] += (target - light[rm.i]) * kl;
+    if (Math.abs(target - light[rm.i]) < .003) light[rm.i] = target;
+  }
+  for (const w of worldTexts) w.el.style.opacity = (1 - (1 - light[w.room]) * FOG_MAX).toFixed(3);
 
   // camera
   let tx, ty;
-  if (zoomOut && S.room >= 0) { tx = rooms[S.room].cx * T; ty = rooms[S.room].cy * T; }
-  else { tx = (S.guide.rx + .5) * T; ty = (S.guide.ry + .5) * T; }
+  const meP = S.me != null ? S.players.get(S.me) : null;
+  const focus = (meP && t < manualUntil) ? meP : S.guide;
+  if (zoomOut && S.room >= 0 && focus === S.guide) { tx = rooms[S.room].cx * T; ty = rooms[S.room].cy * T; }
+  else { tx = (focus.rx + .5) * T; ty = (focus.ry + .5) * T; }
   if (!cam.init) { cam.x = tx; cam.y = ty; cam.init = true; }
   const kc = 1 - Math.exp(-dt * 7);
   cam.x += (tx - cam.x) * kc; cam.y += (ty - cam.y) * kc;
   world.style.transform = `translate(${vw / 2 - cam.x * zoom}px, ${vh / 2 - cam.y * zoom}px) scale(${zoom})`;
 
-  updatePlaque();
+  updatePlaque(t);
   renderVote(t);
   drawGround(nearId);
   drawActors(t);

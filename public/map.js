@@ -78,8 +78,13 @@ export const rooms = ROOM_GRID.map(([gx, gy], i) => {
   for (let y = 0; y < RH; y++) for (let x = 0; x < RW; x++) {
     g[oy + y][ox + x] = (x === 0 || y === 0 || x === RW - 1 || y === RH - 1) ? '#' : rows[y - 1][x - 1];
   }
-  return { i, x0: ox + 1, y0: oy + 1, x1: ox + RW - 2, y1: oy + RH - 2, cx: ox + RW / 2, cy: oy + RH / 2, spawn: null, entry: null };
+  return { i, ox, oy, x0: ox + 1, y0: oy + 1, x1: ox + RW - 2, y1: oy + RH - 2, cx: ox + RW / 2, cy: oy + RH / 2, spawn: null, entry: null };
 });
+
+// Room whose RW x RH block (walls included) contains the tile; -1 for empty blocks.
+const blockIdx = new Int8Array(MAP_W * MAP_H).fill(-1);
+rooms.forEach(r => { for (let y = r.oy; y < r.oy + RH; y++) for (let x = r.ox; x < r.ox + RW; x++) blockIdx[y * MAP_W + x] = r.i; });
+export const blockRoomAt = (x, y) => (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) ? -1 : blockIdx[y * MAP_W + x];
 
 // Doors between consecutive rooms. `room` = the room the door leads into.
 export const doors = [];
