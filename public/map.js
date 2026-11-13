@@ -1,34 +1,54 @@
 // Museum map. Shared by the browser (ES module) and the server (Node ESM import).
 //
 // Legend:
-//   #  wall        .  floor        =  door tile (open only if its room is unlocked)
-//   h  vote zone "human"           a  vote zone "agent"
-//   S  spawn tile of a room        other digits / letters: exhibit anchors (see EXHIBIT_KEYS)
+//   #  wall (inside a room: low partition)   .  floor        =  door tile (open only if its room is unlocked)
+//   h  vote zone "human"                     a  vote zone "agent"
+//   S  spawn tile of a room                  L  lava (guide + robot agents can step in and fall; visitors can't)
+//   props (solid): o pillar, n bench, p plant, k desk, d rubber duck, m samovar, c coffee machine
+//   other digits / letters: exhibit anchors (see EXHIBIT_KEYS; a prop listed there is an easter egg with a plaque)
 //
 // Each room is RW x RH tiles including its 1-tile wall. Rooms are laid out as a snake:
 //   [0][1][2][3]
-//      [6][5][4]
+//   [7][6][5][4]      7 = secret lava hall (hidden door, opened by the Konami code or N)
 // Doorways are 3 tiles wide and 2 tiles deep (both rooms' walls).
 
 export const RW = 24, RH = 14;
-const ROOM_GRID = [[0, 0], [1, 0], [2, 0], [3, 0], [3, 1], [2, 1], [1, 1]];
+const ROOM_GRID = [[0, 0], [1, 0], [2, 0], [3, 0], [3, 1], [2, 1], [1, 1], [0, 1]];
+export const PROPS = 'onpkdmc';
 
 const E = '......................'; // empty 22-wide interior row
 const INTERIORS = [
   [ // 0 lobby
-    '..22.....1111.....33..',
-    E, E, E, E,
+    '..22..l..1111.....33..',
+    E,
+    '.o..................o.',
+    E, E,
     '.S....................',
-    E, E, E, E, E, E,
+    E, E,
+    '.o..................o.',
+    E,
+    '..m...nnn....nnn...p..',
+    E,
   ],
-  [ // 1 the 2 AM room
+  [ // 1 the 2 AM room (dim)
     '...11....2222....33...',
-    E, E, E, E, E, E, E, E, E, E,
+    E, E,
+    '...kk.............kk..',
+    '...kk..d..........kk..',
+    E, E, E,
+    '..........o...........',
+    E, E,
     '...............44.....',
   ],
   [ // 2 evidence
-    '....1111......2222....',
-    E, E, E, E, E, E, E, E, E, E, E,
+    '....1111..xx..2222....',
+    E,
+    '.o..................o.',
+    E, E,
+    '..........nn..........',
+    E, E, E,
+    '.o..................o.',
+    E, E,
   ],
   [ // 3 human or agent?
     '.........1111.........',
@@ -38,34 +58,66 @@ const INTERIORS = [
     '...hhhhhh....aaaaaa...',
     '...hhhhhh....aaaaaa...',
     '...hhhhhh....aaaaaa...',
-    E, E, E,
+    E,
+    '.o..................o.',
+    E,
   ],
   [ // 4 gallery of 7 skills (walk order: 1 2 3 4 along the top, 5 6 7 back along the bottom)
     '..11.22.......33..44..',
-    E, E, E, E, E, E, E, E, E, E,
+    E, E, E,
+    '...######....######...',
+    E,
+    '..........p...........',
+    '...######....######...',
+    E, E, E,
     '.....77....66....55...',
   ],
   [ // 5 brief workshop
     '.........1111.........',
-    E, E, E, E, E, E, E, E, E, E,
+    E, E,
+    '...nn............nn...',
+    E, E, E, E,
+    '...nn............nn...',
+    E,
+    '....................c.',
     '..........22..........',
   ],
   [ // 6 where to start
     '..11...22...33...44...',
-    E, E, E, E, E, E, E, E, E, E,
+    E,
+    '.o..................o.',
+    E, E, E, E, E, E,
+    '.o..................o.',
+    E,
     '....qqqqqq....bbbb....',
+  ],
+  [ // 7 secret lava hall
+    'LLLLLLLLLLL....1111...',
+    'LLLLLLLLLL............',
+    'LLLLLLLLLL............',
+    'LLLLLLLLL.....o.......',
+    'LLLLLLLLL.............',
+    'LLLLL.................',
+    'LLLLL............S....',
+    'LLLLLLLLL.............',
+    'LLLLLLLLL.....o.......',
+    'LLLLLLLLLL............',
+    'LLLLLLLLLL............',
+    'LLLLLLLLLLL...........',
   ],
 ];
 
 const EXHIBIT_KEYS = [
-  { 1: 'lobby.sign', 2: 'lobby.guide', 3: 'lobby.help' },
-  { 1: 'r1.message', 2: 'r1.ticket', 3: 'r1.clock', 4: 'r1.lesson' },
-  { 1: 'r2.wef', 2: 'r2.aristotle' },
+  { 1: 'lobby.sign', 2: 'lobby.guide', 3: 'lobby.help', l: 'egg.loading', m: 'egg.samovar' },
+  { 1: 'r1.message', 2: 'r1.ticket', 3: 'r1.clock', 4: 'r1.lesson', d: 'egg.duck' },
+  { 1: 'r2.wef', 2: 'r2.aristotle', x: 'egg.404' },
   { 1: 'r3.rules' },
-  { 1: 'r4.brief', 2: 'r4.delegate', 3: 'r4.empathy', 4: 'r4.feedback', 5: 'r4.verify', 6: 'r4.influence', 7: 'r4.learning' },
-  { 1: 'r5.board', 2: 'r5.meta' },
+  { 1: 'r4.brief', 2: 'r4.delegate', 3: 'r4.empathy', 4: 'r4.feedback', 5: 'r4.verify', 6: 'r4.influence', 7: 'r4.learning', p: 'egg.plant' },
+  { 1: 'r5.board', 2: 'r5.meta', c: 'egg.coffee' },
   { 1: 'r6.t1', 2: 'r6.t2', 3: 'r6.t3', 4: 'r6.t4', q: 'r6.quote', b: 'r6.qa' },
+  { 1: 'egg.edge' },
 ];
+export const SECRET_ROOM = 7;
 
 const GW = 4, GH = 2;
 export const MAP_W = GW * RW, MAP_H = GH * RH;
@@ -108,7 +160,8 @@ export const MAP = g.map(r => r.join(''));
 const roomIdx = new Int8Array(MAP_W * MAP_H).fill(-1);
 export const exhibits = [];
 export const zones = { h: [], a: [] };
-const SPECIAL = '.#Sha= ';
+const SPECIAL = '.#Sha= L';
+export const props = []; // { x, y, kind, room }
 
 rooms.forEach((r, i) => {
   const found = {};
@@ -119,8 +172,9 @@ rooms.forEach((r, i) => {
     else if (c === 'h' || c === 'a') zones[c].push({ x, y });
     else if (!SPECIAL.includes(c)) {
       const id = EXHIBIT_KEYS[i][c];
-      if (!id) throw new Error(`unknown exhibit '${c}' in room ${i}`);
-      const e = found[c] ||= { id, room: i, x0: x, y0: y, x1: x, y1: y };
+      if (PROPS.includes(c)) props.push({ x, y, kind: c, room: i });
+      if (!id) { if (PROPS.includes(c)) continue; throw new Error(`unknown exhibit '${c}' in room ${i}`); }
+      const e = found[c] ||= { id, room: i, x0: x, y0: y, x1: x, y1: y, egg: id.startsWith('egg.'), prop: PROPS.includes(c) ? c : null };
       e.x0 = Math.min(e.x0, x); e.y0 = Math.min(e.y0, y);
       e.x1 = Math.max(e.x1, x); e.y1 = Math.max(e.y1, y);
     }
@@ -141,7 +195,7 @@ export const doorRoomAt = (x, y) => doorIdx.get(y * MAP_W + x) ?? -1;
 
 export function isWalkable(x, y, unlocked) {
   const c = tileAt(x, y);
-  if (c === '.' || c === 'S' || c === 'h' || c === 'a') return true;
+  if (c === '.' || c === 'S' || c === 'h' || c === 'a' || c === 'L') return true;
   return c === '=' && doorRoomAt(x, y) <= unlocked;
 }
 

@@ -4,8 +4,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
-import { MAP_W, MAP_H, rooms, zones, isWalkable, blockRoomAt } from './public/map.js';
-import { UI, EXHIBITS } from './public/content.js';
+import { MAP_W, MAP_H, rooms, zones, isWalkable, blockRoomAt, tileAt } from './public/map.js';
+import { UI, EXHIBITS, BOT_NAME } from './public/content.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -18,7 +18,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', (_req, res) => res.send('ok'));
 
 const server = http.createServer(app);
-const io = new Server(server, { maxHttpBufferSize: 1e4, pingInterval: 10000, pingTimeout: 20000 });
+const io = new Server(server, { maxHttpBufferSize: 1e4, pingInterval: 10000, pingTimeout: 20000, perMessageDeflate: { threshold: 256 } });
 
 process.on('uncaughtException', err => console.error('uncaught', err));
 const safe = fn => (...args) => { try { fn(...args); } catch (err) { console.error('handler error', err); } };
@@ -26,6 +26,8 @@ const safe = fn => (...args) => { try { fn(...args); } catch (err) { console.err
 // ------------------------------------------------------------------ shared state
 const N = MAP_W * MAP_H;
 const ROOMS = rooms.length;
+const BOTS = Number(process.env.BOTS ?? 6); // robot dummy agents that blindly follow the guide (even into lava)
+const LAVA_RESPAWN_MS = 1500;
 const MANUAL_MS = 8000; // a visitor who moved themselves resumes following the guide after this idle time
 const st = {
   gx: rooms[0].spawn.x, gy: rooms[0].spawn.y,
@@ -44,27 +46,31 @@ let nextId = 1, visitorNo = 0;
 let guideDirty = false, countsDirty = false, lastOnline = -1;
 
 // ------------------------------------------------------------------ pathing
-// Visitor walk mask: open tiles inside rooms the guide has already discovered.
-const walk = new Uint8Array(N);
+// pass: open tiles inside rooms the guide has discovered (incl. lava; robots path through it)
+// walk: same minus lava (where visitors may stand)
+const walk = new Uint8Array(N), pass = new Uint8Array(N), lava = new Uint8Array(N);
+for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) lava[y * MAP_W + x] = tileAt(x, y) === 'L' ? 1 : 0;
 function rebuildWalk() {
-  for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
-    walk[y * MAP_W + x] = isWalkable(x, y, st.unlocked) && blockRoomAt(x, y) <= st.discovered ? 1 : 0;
+  for (let i = 0; i < N; i++) {
+    const x = i % MAP_W, y = (i / MAP_W) | 0;
+    pass[i] = isWalkable(x, y, st.unlocked) && blockRoomAt(x, y) <= st.discovered ? 1 : 0;
+    walk[i] = pass[i] && !lava[i] ? 1 : 0;
   }
 }
 rebuildWalk();
 
 const Q = new Int32Array(N);
-function bfs(start, out) {
+function bfs(start, out, m = walk) {
   out.fill(-1);
   out[start] = 0;
   let h = 0, t = 0;
   Q[t++] = start;
   while (h < t) {
     const i = Q[h++], d = out[i] + 1, x = i % MAP_W;
-    if (x > 0 && walk[i - 1] && out[i - 1] < 0) { out[i - 1] = d; Q[t++] = i - 1; }
-    if (x < MAP_W - 1 && walk[i + 1] && out[i + 1] < 0) { out[i + 1] = d; Q[t++] = i + 1; }
-    if (i >= MAP_W && walk[i - MAP_W] && out[i - MAP_W] < 0) { out[i - MAP_W] = d; Q[t++] = i - MAP_W; }
-    if (i + MAP_W < N && walk[i + MAP_W] && out[i + MAP_W] < 0) { out[i + MAP_W] = d; Q[t++] = i + MAP_W; }
+    if (x > 0 && m[i - 1] && out[i - 1] < 0) { out[i - 1] = d; Q[t++] = i - 1; }
+    if (x < MAP_W - 1 && m[i + 1] && out[i + 1] < 0) { out[i + 1] = d; Q[t++] = i + 1; }
+    if (i >= MAP_W && m[i - MAP_W] && out[i - MAP_W] < 0) { out[i - MAP_W] = d; Q[t++] = i - MAP_W; }
+    if (i + MAP_W < N && m[i + MAP_W] && out[i + MAP_W] < 0) { out[i + MAP_W] = d; Q[t++] = i + MAP_W; }
   }
 }
 
@@ -81,24 +87,24 @@ function zoneField(i) {
 }
 function refreshField() {
   if (!fieldDirty) return;
-  bfs(st.gy * MAP_W + st.gx, field);
+  bfs(st.gy * MAP_W + st.gx, field, pass);
   fieldDirty = false;
   nearCache = null;
 }
 function placeNear(p) {
   refreshField();
-  if (!nearCache) { nearCache = []; for (let i = 0; i < N; i++) if (field[i] >= 2 && field[i] <= 5) nearCache.push(i); }
+  if (!nearCache) { nearCache = []; for (let i = 0; i < N; i++) if (walk[i] && field[i] >= 2 && field[i] <= 5) nearCache.push(i); }
   const i = nearCache.length ? nearCache[(Math.random() * nearCache.length) | 0] : st.gy * MAP_W + st.gx;
   p.x = i % MAP_W; p.y = (i / MAP_W) | 0;
   dirty.add(p);
 }
 
 const NB = [-1, 1, -MAP_W, MAP_W];
-function neighbours(i) {
+function neighbours(i, m = walk) {
   const x = i % MAP_W, out = [];
   for (const o of NB) {
     const n = i + o;
-    if (n < 0 || n >= N || !walk[n]) continue;
+    if (n < 0 || n >= N || !m[n]) continue;
     if ((o === -1 && x === 0) || (o === 1 && x === MAP_W - 1)) continue;
     out.push(n);
   }
@@ -107,8 +113,30 @@ function neighbours(i) {
 
 function stepPlayer(p, t) {
   if (t < p.nextAt) return;
-  p.nextAt = t + 150 + Math.random() * 50;
+  if (p.fallAt) { // fell into lava: respawn next to the guide
+    if (t - p.fallAt < LAVA_RESPAWN_MS) return;
+    p.fallAt = 0; placeNear(p); return;
+  }
+  p.nextAt = t + (p.bot ? 110 + Math.random() * 60 : 150 + Math.random() * 50);
   const i = p.y * MAP_W + p.x;
+  if (p.bot) { // dummy agents: follow the guide's exact path, lava included
+    const d = field[i];
+    if (d < 0 || d > 60) { placeNear(p); return; }
+    const stopAt = lava[st.gy * MAP_W + st.gx] ? 0 : p.space;
+    let next = -1;
+    if (d > stopAt) {
+      const c = neighbours(i, pass).filter(n => field[n] === d - 1);
+      if (c.length) next = c[(Math.random() * c.length) | 0];
+    } else if (Math.random() < 0.05) {
+      const c = neighbours(i).filter(n => field[n] >= 1 && field[n] <= p.space + 1);
+      if (c.length) next = c[(Math.random() * c.length) | 0];
+    }
+    if (next >= 0) {
+      p.x = next % MAP_W; p.y = (next / MAP_W) | 0; dirty.add(p);
+      if (lava[next]) p.fallAt = t;
+    }
+    return;
+  }
   const voting = p.choice && p.target != null;
   if (!voting && p.goal >= 0) { // tap-to-move
     const gf = zoneField(p.goal), gd = gf[i];
@@ -169,7 +197,7 @@ const metaMsg = () => ({
   vote: { idx: st.vote.idx, remaining: Math.max(0, st.vote.endsAt - Date.now()), revealed: st.vote.revealed, counts: st.vote.counts },
 });
 const playerRow = p => [p.id, p.x, p.y, p.avatar, p.name];
-const onlineCount = () => { let n = 0; for (const p of players.values()) if (p.connected) n++; return n; };
+const onlineCount = () => { let n = 0; for (const p of players.values()) if (p.connected && !p.bot) n++; return n; };
 const snapshot = () => ({ g: [st.gx, st.gy], meta: metaMsg(), players: [...players.values()].map(playerRow), n: onlineCount() });
 
 function applyHostState(s) {
@@ -301,7 +329,7 @@ io.on('connection', socket => {
   socket.on('react', safe((idx) => {
     const p = players.get(socket.data.pid);
     const t = Date.now();
-    if (!p || !Number.isInteger(idx) || idx < 0 || idx > 4 || t - lastReact < 1000) return;
+    if (!p || !Number.isInteger(idx) || idx < 0 || idx > 5 || t - lastReact < 1000) return;
     lastReact = t;
     io.emit('r', [p.id, idx]);
   }));
@@ -312,6 +340,18 @@ io.on('connection', socket => {
     if (p && p.socketId === socket.id) { p.connected = false; p.goneAt = Date.now(); }
   }));
 });
+
+// ------------------------------------------------------------------ robot dummy agents
+for (let k = 1; k <= BOTS; k++) {
+  const p = {
+    id: nextId++, sessionId: 'bot-' + k, socketId: null, connected: true, goneAt: 0, bot: true,
+    name: BOT_NAME.replace('{n}', nf.format(k)), avatar: 10, x: st.gx, y: st.gy, space: 1 + (k % 3), nextAt: 0,
+    choice: null, target: null, goal: -1, manualUntil: 0, lastStep: 0, lastGoto: 0, fallAt: 0,
+  };
+  placeNear(p);
+  players.set(p.id, p);
+  bySession.set(p.sessionId, p);
+}
 
 // ------------------------------------------------------------------ loops
 setInterval(safe(() => {
@@ -341,7 +381,7 @@ setInterval(safe(() => {
 setInterval(safe(() => {
   const t = Date.now();
   for (const p of players.values()) {
-    if (!p.connected && t - p.goneAt > 60000) {
+    if (!p.bot && !p.connected && t - p.goneAt > 60000) {
       releaseTarget(p);
       players.delete(p.id); bySession.delete(p.sessionId); dirty.delete(p);
       io.emit('pleave', p.id);

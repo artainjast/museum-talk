@@ -1,5 +1,5 @@
-import { MAP_W, MAP_H, RW, RH, rooms, doors, exhibits, zoneRect, tileAt, roomAt, doorRoomAt, blockRoomAt, isWalkable, exDist } from './map.js';
-import { UI, EXTRA, AVATARS, AVATAR_SPRITES, REACTIONS, ROOM_TITLES, EXHIBITS, SCENARIOS, VOTE_FINAL, HELP_KEYS } from './content.js';
+import { MAP_W, MAP_H, RW, RH, rooms, doors, exhibits, props, zoneRect, tileAt, roomAt, doorRoomAt, blockRoomAt, isWalkable, exDist, SECRET_ROOM } from './map.js';
+import { UI, EXTRA, AVATARS, AVATAR_SPRITES, REACTIONS, ROOM_TITLES, EXHIBITS, SCENARIOS, VOTE_FINAL, HELP_KEYS, BOT_LINES } from './content.js';
 
 // ---------------------------------------------------------------- utils
 const T = 32;               // world px per tile
@@ -41,7 +41,7 @@ const S = {
 
 if (isGuide) {
   const saved = store.get('museum.guide');
-  if (saved && Number.isInteger(saved.x) && Number.isInteger(saved.unlocked) && isWalkable(saved.x, saved.y, saved.unlocked)) {
+  if (saved && Number.isInteger(saved.x) && Number.isInteger(saved.unlocked) && isWalkable(saved.x, saved.y, saved.unlocked) && tileAt(saved.x, saved.y) !== 'L') {
     S.guide.x = saved.x; S.guide.y = saved.y; S.unlocked = saved.unlocked;
     S.discovered = Number.isInteger(saved.discovered) ? Math.min(saved.discovered, saved.unlocked) : 0;
   }
@@ -150,9 +150,10 @@ function drawGround(nearId) {
   setWorldTransform(c, ground);
   const v = visibleRange();
   for (let y = v.y0; y <= v.y1; y++) for (let x = v.x0; x <= v.x1; x++) {
-    const t = tileAt(x, y);
+    const t = isHiddenDoor(x, y) ? '#' : tileAt(x, y);
     if (t === ' ') continue;
     const px = x * T, py = y * T;
+    if (t === 'L') { c.fillStyle = `hsl(${18 + 10 * Math.sin(performance.now() / 600 + x + y)}, 100%, 52%)`; c.fillRect(px, py, T + .5, T + .5); continue; }
     if (t === '#') {
       c.fillStyle = '#3a3350'; c.fillRect(px, py, T + .5, T + .5);
       const below = tileAt(x, y + 1);
@@ -172,6 +173,10 @@ function drawGround(nearId) {
     if (t === 'h') { c.fillStyle = 'rgba(255,138,61,.28)'; c.fillRect(px, py, T + .5, T + .5); }
     else if (t === 'a') { c.fillStyle = 'rgba(34,184,200,.28)'; c.fillRect(px, py, T + .5, T + .5); }
     else if (t === '=') { c.fillStyle = 'rgba(110,80,50,.16)'; c.fillRect(px, py, T + .5, T + .5); }
+    else if (FLAT_PROP[t]) {
+      c.font = `${T * .7}px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText(FLAT_PROP[t], px + T / 2, py + T / 2);
+    }
   }
   // vote zone borders
   c.setLineDash([6, 5]); c.lineWidth = 2;
@@ -184,7 +189,7 @@ function drawGround(nearId) {
   // exhibits
   for (const e of exhibits) {
     if (e.x1 < v.x0 || e.x0 > v.x1 || e.y1 < v.y0 - 1 || e.y0 > v.y1) continue;
-    drawFrame(c, e, e.id === nearId);
+    if (!e.prop) drawFrame(c, e, e.id === nearId);
   }
   // velvet ropes on locked doors
   // fog of war over rooms the guide hasn't discovered yet
@@ -193,7 +198,7 @@ function drawGround(nearId) {
     c.fillStyle = `rgba(11,10,16,${(1 - light[r.i]) * FOG_MAX})`;
     c.fillRect(r.ox * T, r.oy * T, RW * T + .5, RH * T + .5);
   }
-  for (const d of doors) if (d.room > S.unlocked) drawRope(c, d);
+  for (const d of doors) if (d.room > S.unlocked && d.room !== SECRET_ROOM) drawRope(c, d);
 }
 
 function drawFrame(c, e, glow) {
@@ -355,16 +360,152 @@ function diamond(c, x, y, lift = 0) {
 }
 function quad(c, pts) { c.beginPath(); c.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < 4; i++) c.lineTo(pts[i][0], pts[i][1]); c.closePath(); }
 
-function isoGround() {
+// The secret room's door looks like plain wall until it is unlocked (Konami code or N from room 6).
+const isHiddenDoor = (x, y) => tileAt(x, y) === '=' && doorRoomAt(x, y) === SECRET_ROOM && SECRET_ROOM > S.unlocked;
+const FLAT_PROP = { o: '⚪', n: '🪑', p: '🪴', k: '💻', d: '🦆', m: '🫖', c: '☕' };
+const LAVA_DEPTH = 14;
+
+const shadeCache = new Map();
+function shade(hex, f) {
+  const key = hex + f;
+  let v = shadeCache.get(key);
+  if (!v) {
+    const n = parseInt(hex.slice(1), 16);
+    const ch = k => Math.max(0, Math.min(255, Math.round(((n >> k) & 255) * f)));
+    v = `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+    shadeCache.set(key, v);
+  }
+  return v;
+}
+let curFog = 0; // darkness overlay applied to every voxel face drawn while set
+function fogFill(c, a) { if (a > .005) { c.fillStyle = `rgba(9,9,20,${a})`; c.fill(); } }
+// Voxel box on tile (x,y): footprint [u0,u1] x [v0,v1] in tile units, from height z0 to z1 (world px).
+function vbox(c, x, y, u0, v0, u1, v1, z0, z1, col) {
+  const [ax, ay] = isoPt(x + u0, y + v1), [bx, by] = isoPt(x + u1, y + v1), [qx, qy] = isoPt(x + u1, y + v0), [dx, dy] = isoPt(x + u0, y + v0);
+  quad(c, [[ax, ay - z0], [bx, by - z0], [bx, by - z1], [ax, ay - z1]]); c.fillStyle = shade(col, .8); c.fill(); fogFill(c, curFog);
+  quad(c, [[bx, by - z0], [qx, qy - z0], [qx, qy - z1], [bx, by - z1]]); c.fillStyle = shade(col, .62); c.fill(); fogFill(c, curFog);
+  quad(c, [[dx, dy - z1], [qx, qy - z1], [bx, by - z1], [ax, ay - z1]]); c.fillStyle = col; c.fill(); fogFill(c, curFog);
+}
+function steam(c, x, y, z, t) {
+  const [sx, sy] = isoPt(x + .5, y + .5);
+  c.fillStyle = '#ffffff';
+  for (let i = 0; i < 3; i++) {
+    const ph = (t / 1100 + i / 3) % 1;
+    c.globalAlpha = .55 * (1 - ph);
+    c.beginPath(); c.arc(sx + Math.sin(ph * 6 + i) * 3, sy - z - ph * 22, 2.5 + ph * 4, 0, Math.PI * 2); c.fill();
+  }
+  c.globalAlpha = 1;
+}
+const eggProps = new Set(exhibits.filter(e => e.prop).map(e => e.y0 * MAP_W + e.x0));
+function drawProp(c, p, t) {
+  const { x, y } = p;
+  switch (p.kind) {
+    case 'o': // marble pillar
+      vbox(c, x, y, .14, .14, .86, .86, 0, 7, '#e6dfcf'); vbox(c, x, y, .27, .27, .73, .73, 7, 56, '#f1ebdf'); vbox(c, x, y, .14, .14, .86, .86, 56, 64, '#e6dfcf'); break;
+    case 'n': // bench
+      vbox(c, x, y, .1, .3, .2, .7, 0, 9, '#5b3a1c'); vbox(c, x, y, .8, .3, .9, .7, 0, 9, '#5b3a1c'); vbox(c, x, y, .04, .27, .96, .73, 9, 14, '#a06a36'); break;
+    case 'p': // potted plant
+      vbox(c, x, y, .3, .3, .7, .7, 0, 15, '#c0643b'); vbox(c, x, y, .2, .2, .8, .8, 15, 30, '#3f9a4a'); vbox(c, x, y, .32, .32, .68, .68, 30, 42, '#5cc06a'); vbox(c, x, y, .42, .42, .58, .58, 42, 48, '#7ad487'); break;
+    case 'k': // desk with a laptop
+      vbox(c, x, y, .08, .08, .18, .18, 0, 17, '#5b3a1c'); vbox(c, x, y, .82, .82, .92, .92, 0, 17, '#5b3a1c');
+      vbox(c, x, y, .02, .02, .98, .98, 17, 21, '#a8763f'); vbox(c, x, y, .28, .4, .72, .7, 21, 23, '#2b2b33'); vbox(c, x, y, .28, .32, .72, .38, 23, 36, '#4fa3ff'); break;
+    case 'd': { // rubber duck
+      const b = Math.abs(Math.sin(t / 380)) * 2;
+      vbox(c, x, y, .3, .34, .7, .66, b, b + 10, '#ffd23f'); vbox(c, x, y, .36, .36, .58, .56, b + 10, b + 19, '#ffd23f'); vbox(c, x, y, .58, .42, .7, .5, b + 13, b + 16, '#ff8c1a'); break;
+    }
+    case 'm': // samovar with a teapot
+      vbox(c, x, y, .24, .24, .76, .76, 0, 6, '#7a5526'); vbox(c, x, y, .28, .28, .72, .72, 6, 30, '#d9b45a'); vbox(c, x, y, .36, .36, .64, .64, 30, 35, '#b8933f'); vbox(c, x, y, .38, .38, .62, .62, 35, 44, '#2f6fb0'); steam(c, x, y, 50, t); break;
+    case 'c': // coffee machine
+      vbox(c, x, y, .2, .22, .8, .78, 0, 34, '#3a3a44'); vbox(c, x, y, .24, .26, .76, .74, 34, 37, '#5a5a66'); vbox(c, x, y, .42, .66, .58, .8, 6, 13, '#f4f1ea'); steam(c, x, y + .2, 20, t); break;
+  }
+  if (eggProps.has(y * MAP_W + x)) { // twinkle: this prop has a story
+    const [sx, sy] = isoPt(x + .5, y + .5);
+    c.globalAlpha = .5 + .5 * Math.sin(t / 300 + x);
+    c.font = `14px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText('✨', sx + 14, sy - 52);
+    c.globalAlpha = 1;
+  }
+}
+// 2 AM room: dark, with a lamp-like pool of light around the guide.
+function nightAlpha(x, y) {
+  if (blockRoomAt(x, y) !== 1) return 0;
+  const d = Math.hypot(x - S.guide.rx, y - S.guide.ry);
+  return .55 * Math.max(0, Math.min(1, (d - 2) / 4));
+}
+function bricks(c, a, b, h, odd) {
+  const rowH = 9;
+  c.beginPath();
+  for (let z = rowH; z < h - 3; z += rowH) { c.moveTo(a[0], a[1] - z); c.lineTo(b[0], b[1] - z); }
+  for (let z = 0, r = 0; z < h - 3; z += rowH, r++) {
+    const top = Math.min(z + rowH, h);
+    for (const u of ((r + odd) % 2 ? [.25, .75] : [.5])) {
+      const px = a[0] + (b[0] - a[0]) * u, py = a[1] + (b[1] - a[1]) * u;
+      c.moveTo(px, py - z); c.lineTo(px, py - top);
+    }
+  }
+  c.strokeStyle = 'rgba(12,8,28,.3)'; c.lineWidth = 1; c.stroke();
+}
+function drawBubble(c, text, x, y) {
+  c.font = '700 12px Vazirmatn, Tahoma, sans-serif';
+  c.direction = 'rtl'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  const w = c.measureText(text).width + 18, h = 22;
+  c.fillStyle = 'rgba(255,255,255,.97)';
+  roundRect(c, x - w / 2, y - h, w, h, 9); c.fill();
+  c.beginPath(); c.moveTo(x - 5, y - 1); c.lineTo(x, y + 6); c.lineTo(x + 5, y - 1); c.fill();
+  c.fillStyle = '#1e1a2b'; c.fillText(text, x, y - h / 2 + 1);
+  c.direction = 'ltr';
+}
+const confetti = [];
+const CONF_COLORS = ['#f2b61f', '#ff5d73', '#19d3f0', '#7bd88f', '#b388ff', '#ff8a3d'];
+function burst(n = 180) {
+  for (let i = 0; i < n; i++) {
+    confetti.push({ x: Math.random() * vw, y: -20 - Math.random() * vh * .5, vx: (Math.random() - .5) * 140, vy: 40 + Math.random() * 160,
+      r: Math.random() * 6, vr: (Math.random() - .5) * 10, c: CONF_COLORS[i % CONF_COLORS.length], s: 6 + Math.random() * 6 });
+  }
+}
+function drawConfetti(dt) {
+  if (!confetti.length) return;
+  const c = actx;
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  for (let i = confetti.length - 1; i >= 0; i--) {
+    const p = confetti[i];
+    p.vy += 160 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.r += p.vr * dt;
+    if (p.y > vh + 30) { confetti.splice(i, 1); continue; }
+    c.save(); c.translate(p.x, p.y); c.rotate(p.r); c.fillStyle = p.c; c.fillRect(-p.s / 2, -p.s / 4, p.s, p.s / 2); c.restore();
+  }
+}
+let guideSay = null, guideClicks = 0;
+
+function isoGround(now) {
   const c = gctx;
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, ground.width, ground.height);
   setWorldTransform(c, ground);
   c.lineWidth = 1;
+  // pass 1: lava pit (drawn lower than the floor, animated)
+  for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
+    if (tileAt(x, y) !== 'L' || !isoTileOnScreen(x, y, 40)) continue;
+    const h = hash(x, y);
+    diamond(c, x, y, -LAVA_DEPTH);
+    const col = `hsl(${16 + 10 * Math.sin(now / 700 + (h % 100) / 16)}, 100%, ${48 + 7 * Math.sin(now / 430 + (h % 37))}%)`;
+    c.fillStyle = col; c.strokeStyle = col; c.fill(); c.stroke();
+    if ((h + Math.floor(now / 260)) % 37 === 0) {
+      const [bx, by] = isoPt(x + .5, y + .5);
+      c.fillStyle = '#ffe28a'; c.beginPath(); c.arc(bx, by + LAVA_DEPTH, 4, 0, Math.PI * 2); c.fill();
+    }
+    const lt = light[blockRoomAt(x, y)] ?? 1;
+    if (lt < .995) { diamond(c, x, y, -LAVA_DEPTH); c.fillStyle = `rgba(11,10,16,${(1 - lt) * FOG_MAX})`; c.fill(); }
+  }
   for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
     const t = tileAt(x, y);
-    if (t === ' ' || t === '#') continue;
+    if (t === ' ' || t === '#' || t === 'L' || isHiddenDoor(x, y)) continue;
     if (!isoTileOnScreen(x, y, 40)) continue;
+    // cliff faces where the floor drops into lava
+    if (tileAt(x, y + 1) === 'L' || tileAt(x + 1, y) === 'L') {
+      const [ex, ey] = isoPt(x + 1, y), [sx, sy] = isoPt(x + 1, y + 1), [wx, wy] = isoPt(x, y + 1);
+      if (tileAt(x, y + 1) === 'L') { quad(c, [[wx, wy], [sx, sy], [sx, sy + LAVA_DEPTH], [wx, wy + LAVA_DEPTH]]); c.fillStyle = '#4a3026'; c.fill(); }
+      if (tileAt(x + 1, y) === 'L') { quad(c, [[sx, sy], [ex, ey], [ex, ey + LAVA_DEPTH], [sx, sy + LAVA_DEPTH]]); c.fillStyle = '#35221b'; c.fill(); }
+    }
     let col = floorColor(x, y);
     diamond(c, x, y);
     c.fillStyle = col; c.strokeStyle = col; c.fill(); c.stroke();
@@ -374,6 +515,8 @@ function isoGround() {
     else if (t === '=') { c.fillStyle = 'rgba(110,80,50,.18)'; c.fill(); }
     const lt = light[blockRoomAt(x, y)] ?? 1;
     if (lt < .995) { c.fillStyle = `rgba(11,10,16,${(1 - lt) * FOG_MAX})`; c.fill(); }
+    const na = nightAlpha(x, y);
+    if (na > .01) { c.fillStyle = `rgba(6,10,35,${na})`; c.fill(); }
   }
   // vote zone borders
   c.setLineDash([8, 6]); c.lineWidth = 2;
@@ -424,15 +567,20 @@ function drawPanel(c, xa, ya, xb, yb, z0, z1, id, glow, legs) {
 
 function drawWall(c, x, y, h, fog, frames, nearId) {
   const [nx, ny] = isoPt(x, y), [ex, ey] = isoPt(x + 1, y), [sx, sy] = isoPt(x + 1, y + 1), [wx, wy] = isoPt(x, y + 1);
+  const v = .93 + (hash(x, y) % 8) * .02; // slight per-block tint so walls look built, not flat
   const faces = [
-    [[wx, wy], [sx, sy], [sx, sy - h], [wx, wy - h], '#3d3756'],      // south face (down-left)
-    [[sx, sy], [ex, ey], [ex, ey - h], [sx, sy - h], '#2c2740'],      // east face (down-right)
-    [[nx, ny - h], [ex, ey - h], [sx, sy - h], [wx, wy - h], '#5c5479'], // top
+    [[wx, wy], [sx, sy], [sx, sy - h], [wx, wy - h], shade('#3d3756', v)],      // south face (down-left)
+    [[sx, sy], [ex, ey], [ex, ey - h], [sx, sy - h], shade('#2c2740', v)],      // east face (down-right)
+    [[nx, ny - h], [ex, ey - h], [sx, sy - h], [wx, wy - h], shade('#5c5479', v)], // top
   ];
-  for (const [a, b, cc, d, col] of faces) {
+  for (let i = 0; i < 3; i++) {
+    const [a, b, cc, d, col] = faces[i];
     quad(c, [a, b, cc, d]);
     c.fillStyle = col; c.strokeStyle = col; c.lineWidth = 1; c.fill(); c.stroke();
-    if (fog > .005) { c.fillStyle = `rgba(11,10,16,${fog})`; c.fill(); }
+    if (i === 0 && h > 16) bricks(c, a, b, h, (x + y) & 1);
+    if (i === 1 && h > 16) bricks(c, a, b, h, (x + y + 1) & 1);
+    if (i === 2) { quad(c, [a, b, cc, d]); c.strokeStyle = 'rgba(255,255,255,.08)'; c.stroke(); }
+    if (fog > .005) { quad(c, [a, b, cc, d]); c.fillStyle = `rgba(11,10,16,${fog})`; c.fill(); }
   }
   // baseboard on the south face
   if (h > 20) { quad(c, [[wx, wy], [sx, sy], [sx, sy - 4], [wx, wy - 4]]); c.fillStyle = '#251f36'; c.fill(); }
@@ -485,23 +633,28 @@ function isoScene(t, focusRoom) {
   }
   const items = [];
   for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
-    if (tileAt(x, y) !== '#' || !isoTileOnScreen(x, y, 90)) continue;
+    if ((tileAt(x, y) !== '#' && !isHiddenDoor(x, y)) || !isoTileOnScreen(x, y, 90)) continue;
     const b = blockRoomAt(x, y), r = rooms[b];
     const back = y === r.oy || x === r.ox;
     const h = back ? WALL_TALL + (WALL_SHORT - WALL_TALL) * lowered[b] : WALL_SHORT;
-    const fog = (1 - (light[b] ?? 1)) * FOG_MAX;
+    const fog = 1 - (1 - (1 - (light[b] ?? 1)) * FOG_MAX) * (1 - nightAlpha(x, y));
     // frames hang on the wall tile above an exhibit's first tile; draw them with that tile only
     const fr = wallFrames.get(y * MAP_W + x) && y === r.oy ? wallFrames.get(y * MAP_W + x) : null;
     items.push({ d: x + y + 1, k: 0, draw: () => drawWall(c, x, y, h, fog, fr, nearId) });
   }
+  for (const pr of props) {
+    if (!isoTileOnScreen(pr.x, pr.y, 90)) continue;
+    const fog = 1 - (1 - (1 - (light[pr.room] ?? 1)) * FOG_MAX) * (1 - nightAlpha(pr.x, pr.y));
+    items.push({ d: pr.x + pr.y + 1, k: 0, draw: () => { curFog = fog; drawProp(c, pr, t); curFog = 0; } });
+  }
   for (const e of exhibits) {
-    if (e.y0 === rooms[e.room].y0) continue; // wall-mounted
+    if (e.prop || e.y0 === rooms[e.room].y0) continue; // props draw themselves; wall-mounted frames draw with their wall
     if (!isoTileOnScreen(e.x0, e.y0, 120)) continue;
     const yy = e.y0 + .55;
     items.push({ d: (e.x0 + e.x1 + 1) / 2 + yy + .4, k: 1, draw: () => drawPanel(c, e.x0 + .05, yy, e.x1 + .95, yy, 10, 52, e.id, e.id === nearId, true) });
   }
   for (const d of doors) {
-    if (d.room <= S.unlocked) continue;
+    if (d.room <= S.unlocked || d.room === SECRET_ROOM) continue;
     items.push({ d: (d.x0 + d.x1 + 1) / 2 + (d.y0 + d.y1 + 1) / 2, k: 1, draw: () => drawIsoRope(c, d) });
   }
   const me = S.me != null ? S.players.get(S.me) : null;
@@ -529,10 +682,25 @@ let isoDt = 0;
 
 const ISO_D = 76, ISO_GUIDE_D = 86;
 function drawIsoActor(c, a, t, opts, labels) {
-  const [cx, feet] = isoPt(a.rx + .5, a.ry + .5);
+  const [cx, feet0] = isoPt(a.rx + .5, a.ry + .5);
   const moving = Math.abs(a.rx - a.x) + Math.abs(a.ry - a.y) > .04;
+  // lava: sink below the surface with a flame
+  if (tileAt(a.x, a.y) === 'L') { if (!a.lavaAt) a.lavaAt = t; } else a.lavaAt = 0;
+  const sink = a.lavaAt ? Math.min(1, (t - a.lavaAt) / 900) : 0;
+  const Dsz = opts.guide ? ISO_GUIDE_D : ISO_D;
+  const feet = feet0 + (sink ? LAVA_DEPTH + sink * Dsz * .9 : 0);
+  if (sink) {
+    labels.push(() => {
+      c.globalAlpha = 1 - sink * .6;
+      c.font = `${22 + Math.sin(t / 90) * 3}px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText('🔥', cx, feet0 + LAVA_DEPTH - 10);
+      c.globalAlpha = 1;
+    });
+    c.save();
+    c.beginPath(); c.rect(cx - Dsz, feet0 + LAVA_DEPTH - Dsz * 2, Dsz * 2, Dsz * 2); c.clip();
+  }
   c.fillStyle = 'rgba(0,0,0,.22)';
-  c.beginPath(); c.ellipse(cx, feet, TW * .26, TH * .26, 0, 0, Math.PI * 2); c.fill();
+  if (!sink) { c.beginPath(); c.ellipse(cx, feet, TW * .26, TH * .26, 0, 0, Math.PI * 2); c.fill(); }
   if (opts.me) {
     c.strokeStyle = '#19d3f0'; c.lineWidth = 3;
     c.beginPath(); c.ellipse(cx, feet, TW * .36 + Math.sin(t / 250) * 2, TH * .36 + Math.sin(t / 250), 0, 0, Math.PI * 2); c.stroke();
@@ -561,8 +729,14 @@ function drawIsoActor(c, a, t, opts, labels) {
     headY = cy - r;
   }
   c.restore();
+  if (sink) { c.restore(); return; }
   if (opts.label) labels.push(() => drawLabel(c, opts.label, cx, headY - 8, opts.guide));
   if (a.react && a.react.until > t) labels.push(() => drawReaction(c, a.react, cx, headY - (opts.label ? 30 : 8), t));
+  if (a.avatar === 10 && !a.react?.until) { // robot agents mumble agent clichés now and then
+    const ph = t / 1000 + a.id * 2.3, cyc = Math.floor(ph / 9);
+    if (ph % 9 < 3.2 && (cyc + a.id) % 2 === 0) labels.push(() => drawBubble(c, BOT_LINES[(cyc * 3 + a.id) % BOT_LINES.length], cx, headY - (opts.label ? 32 : 10)));
+  }
+  if (opts.guide && guideSay && guideSay.until > t) labels.push(() => drawBubble(c, guideSay.text, cx, headY - 32));
 }
 
 // screen px -> tile
@@ -577,10 +751,11 @@ function screenToTile(sx, sy) {
 function exhibitHTML(id, big) {
   const e = EXHIBITS[id];
   if (!e) return '';
-  let h = `<div class="ex-icon">${e.icon}</div>`;
+  let h = EX_IMG[id] && EX_IMG[id].ok ? `<img class="ex-img" src="/art/ex/${id}.png" alt="">` : `<div class="ex-icon">${e.icon}</div>`;
   if (e.title) h += `<h2>${esc(e.title)}</h2>`;
   if (e.sub) h += `<p class="sub" dir="ltr">${esc(e.sub)}</p>`;
-  if (e.text) h += `<p class="text${id === 'r6.quote' ? ' quote' : ''}">${esc(e.text)}</p>`;
+  const text = isGuide && e.textGuide ? e.textGuide : e.text;
+  if (text) h += `<p class="text${id === 'r6.quote' ? ' quote' : ''}">${esc(text)}</p>`;
   if (e.chart) {
     const max = Math.max(...e.chart.bars.map(b => b[1]));
     h += `<div class="chart"><p class="cap">${esc(e.chart.caption)}</p>` + e.chart.bars.map(([l, v]) =>
@@ -617,7 +792,7 @@ function nearestInRoom() {
   const g = S.guide, r = roomAt(g.x, g.y) >= 0 ? roomAt(g.x, g.y) : S.room;
   let best = null, bd = 1e9;
   for (const e of exhibits) {
-    if (e.room !== r) continue;
+    if (e.room !== r || e.egg) continue;
     const d = exDist(e, g.x, g.y) + Math.hypot((e.x0 + e.x1) / 2 - g.x, (e.y0 + e.y1) / 2 - g.y) * .01;
     if (d < bd) { bd = d; best = e; }
   }
@@ -633,7 +808,7 @@ function updatePlaque(t) {
   const p = $('plaque');
   if (!id) { p.hidden = true; return; }
   const ex = EXHIBITS[id];
-  p.innerHTML = `<span class="pi">${ex.icon}</span><span class="pt">${esc(ex.title || ex.text)}</span>` + (isGuide ? '<kbd>E</kbd>' : '');
+  p.innerHTML = `<span class="pi">${ex.icon}</span><span class="pt">${esc(ex.title || (isGuide && ex.textGuide) || ex.text)}</span>` + (isGuide ? '<kbd>E</kbd>' : '');
   p.hidden = false;
 }
 $('plaque').addEventListener('click', () => nearId && openCard(nearId));
@@ -704,7 +879,7 @@ function renderVote(t) {
   }
   if (v.revealed) {
     h += `<p class="vp-reveal">${esc(sc.reveal)}</p>`;
-    if (v.idx === SCENARIOS.length - 1) h += `<p class="vp-final">${esc(VOTE_FINAL)}</p>`;
+    if (v.idx >= 3) h += `<p class="vp-final">${esc(VOTE_FINAL)}</p>`;
   }
   p.innerHTML = h;
 }
@@ -722,10 +897,12 @@ function hostSend() {
 
 function moveGuide(dx, dy) {
   const g = S.guide;
+  if (g.fallAt) return; // sinking in lava
   setFacing(g, dx, dy);
   const nx = g.x + dx, ny = g.y + dy;
   if (!isWalkable(nx, ny, S.unlocked)) return;
   g.x = nx; g.y = ny;
+  if (tileAt(nx, ny) === 'L') g.fallAt = now();
   saveGuide();
   hostSend('move');
 }
@@ -771,11 +948,27 @@ const DIRS = {
 let held = [];
 let nextStep = 0;
 
+const KONAMI = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'KeyB', 'KeyA'];
+let konamiPos = 0;
+// Returns true when the key was eaten by the code (its final B and A), so they don't re-lock / walk.
+function konamiStep(code) {
+  if (code === KONAMI[konamiPos]) konamiPos++;
+  else { konamiPos = code === KONAMI[0] ? 1 : 0; return false; }
+  if (konamiPos === KONAMI.length) { konamiPos = 0; onKonami(); return true; }
+  return konamiPos > 8;
+}
+function onKonami() {
+  burst();
+  if (isGuide) { if (S.unlocked >= SECRET_ROOM - 1 && S.unlocked < SECRET_ROOM) setUnlocked(SECRET_ROOM); }
+  else if (joined) react(5);
+}
+
 addEventListener('keydown', ev => {
   const code = ev.code;
   if (ev.target instanceof HTMLInputElement) return;
   if (code.startsWith('Arrow') || code === 'Space') ev.preventDefault();
   if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  if (!ev.repeat && konamiStep(code)) { ev.preventDefault(); return; }
   if (isGuide) {
     if (DIRS[code]) {
       if (!ev.repeat && !held.includes(code)) {
@@ -813,7 +1006,7 @@ addEventListener('keydown', ev => {
       case 'KeyK': toggleHelp(); break;
       case 'Home': if (ev.shiftKey) resetAll(); break;
       default:
-        if (ev.shiftKey && /^Digit[0-6]$/.test(code)) teleport(Number(code[5]));
+        if (ev.shiftKey && /^Digit[0-7]$/.test(code)) teleport(Number(code[5]));
     }
   } else {
     if (DIRS[code]) {
@@ -862,6 +1055,7 @@ function upsertPlayer([id, x, y, avatar, name]) {
 }
 function applyMeta(m) {
   if (role === 'visitor') {
+    if (m.unlocked >= SECRET_ROOM && S.unlocked < SECRET_ROOM && S.unlocked > 0) burst();
     S.unlocked = m.unlocked;
     S.discovered = m.discovered ?? S.discovered;
     if (m.spotlight !== S.spotlight) { S.spotlight = m.spotlight; spotDismissed = null; renderSpot(); }
@@ -902,7 +1096,7 @@ function setupJoin() {
   $('joinBtn').textContent = UI.join;
   let avatar = session && Number.isInteger(session.avatar) ? session.avatar : (Math.random() * 10) | 0;
   const box = $('avatars');
-  AVATARS.forEach((e, i) => {
+  AVATARS.slice(0, 10).forEach((e, i) => {
     const b = document.createElement('button');
     b.type = 'button';
     b.dataset.i = i;
@@ -937,12 +1131,19 @@ function startVisitor() {
 }
 $('stage').addEventListener('pointerup', ev => {
   if (role !== 'visitor' || !joined) return;
+  // easter egg: poke the guide 5 times
+  const [gx, gy] = ISO ? isoPt(S.guide.rx + .5, S.guide.ry + .5) : [(S.guide.rx + .5) * T, (S.guide.ry + .86) * T];
+  const gsx = (gx - cam.x) * zoom + vw / 2, gsy = (gy - cam.y) * zoom + vh / 2, gd = (ISO ? ISO_GUIDE_D : GUIDE_D) * zoom;
+  if (Math.abs(ev.clientX - gsx) < gd * .3 && ev.clientY < gsy + 6 && ev.clientY > gsy - gd * .95) {
+    if (++guideClicks >= 5) { guideClicks = 0; guideSay = { text: EXTRA.guideEgg, until: now() + 3500 }; }
+    return;
+  }
   const [x, y] = screenToTile(ev.clientX, ev.clientY);
-  if (isWalkable(x, y, S.unlocked) && blockRoomAt(x, y) <= S.discovered) visitorGoto(x, y);
+  if (isWalkable(x, y, S.unlocked) && tileAt(x, y) !== 'L' && blockRoomAt(x, y) <= S.discovered) visitorGoto(x, y);
 });
 
 function setupBar() {
-  REACTIONS.forEach((e, i) => {
+  REACTIONS.slice(0, 5).forEach((e, i) => {
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = e;
@@ -1034,6 +1235,14 @@ function frame() {
     nextStep = t + STEP_MS;
   }
 
+  // fell into lava: respawn at this room's spawn tile
+  if (isGuide && S.guide.fallAt && t - S.guide.fallAt > 1500) {
+    const rr = rooms[blockRoomAt(S.guide.x, S.guide.y)] || rooms[0];
+    S.guide.fallAt = 0; S.guide.lavaAt = 0;
+    S.guide.x = S.guide.rx = rr.spawn.x; S.guide.y = S.guide.ry = rr.spawn.y;
+    saveGuide(); hostSend();
+  }
+
   // interpolate
   const k = 1 - Math.exp(-dt * 16);
   const lerp = a => {
@@ -1075,12 +1284,13 @@ function frame() {
   renderVote(t);
   if (ISO) {
     isoDt = dt;
-    isoGround();
+    isoGround(t);
     isoScene(t, blockRoomAt(focus.x, focus.y));
   } else {
     drawGround(nearId);
     drawActors(t);
   }
+  drawConfetti(dt);
   requestAnimationFrame(frame);
 }
 

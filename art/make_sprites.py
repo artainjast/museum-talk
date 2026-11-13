@@ -2,6 +2,7 @@
 
 Run headless:
   /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P art/make_sprites.py
+  (optional: SPRITE_CHARS=robot to render a subset; framing still uses all characters)
 
 Outputs public/sprites/<name>.png (128x128 RGBA, transparent) and art/contact.png.
 All designs are original: chibi block humanoids with animal heads + a tour guide.
@@ -331,8 +332,46 @@ def make_guide():
     return b
 
 
+def make_robot():
+    """Friendly AI-agent robot: white metal cube head, dark visor with glowing
+    cyan eyes + smile, antenna with a glowing ball, teal chest panel."""
+    b = Builder("robot")
+    shell, metal, dark = "#e6eaef", "#a9b2bd", "#4b5361"
+    glow, teal = "#4ff0ff", "#18a6ad"
+    for s in (-1, 1):
+        b.box((s * 0.16, 0, 0.27), (0.22, 0.26, 0.36), metal)  # legs
+        b.box((s * 0.16, -0.03, 0.065), (0.32, 0.42, 0.13), dark)  # chunky feet
+        b.box((s * 0.16, -0.245, 0.065), (0.2, 0.02, 0.04), teal)  # toe stripe
+        b.box((s * 0.47, 0, 0.93), (0.2, 0.24, 0.32), metal)  # upper arm
+        b.box((s * 0.47, 0, 0.75), (0.21, 0.25, 0.05), dark)  # elbow joint
+        b.box((s * 0.47, 0, 0.635), (0.22, 0.26, 0.19), dark)  # hand
+    b.box((0, 0, 0.47), (0.64, 0.38, 0.08), dark)  # waist
+    b.box((0, 0, 0.8), (0.72, 0.42, 0.6), shell)  # torso 0.5..1.1
+    b.box((0, -0.22, 0.82), (0.44, 0.04, 0.34), teal)  # chest panel
+    b.box((0.11, -0.245, 0.9), (0.09, 0.03, 0.09), "#d8fffc")  # tiny light
+    for x in (-0.11, -0.03):  # panel slits
+        b.box((x, -0.245, 0.74), (0.05, 0.03, 0.1), "#0e6f75")
+    b.box((0, 0.24, 0.8), (0.42, 0.08, 0.4), metal)  # back battery
+    b.box((0, 0, 1.13), (0.3, 0.3, 0.08), dark)  # neck
+    # head 1.1..2.0
+    b.box((0, 0, 1.55), (1.0, 0.9, 0.9), shell)
+    b.face(0, 1.56, 0.82, 0.6, "#1a2230", protrude=0.0)  # visor screen
+    for s in (-1, 1):
+        b.face(s * 0.2, 1.65, 0.16, 0.2, glow, protrude=0.02)  # eyes
+        b.face(s * 0.13, 1.44, 0.06, 0.06, glow, protrude=0.02)  # smile corners
+        b.box((s * 0.53, 0, 1.55), (0.07, 0.34, 0.34), teal)  # ear discs
+        b.box((s * 0.57, 0, 1.55), (0.03, 0.16, 0.16), metal)
+    b.face(0, 1.4, 0.22, 0.05, glow, protrude=0.02)  # smile
+    b.box((0, 0.46, 1.6), (0.5, 0.04, 0.3), metal)  # back vent plate
+    # antenna
+    b.box((0, 0, 2.025), (0.22, 0.22, 0.05), metal)
+    b.box((0, 0, 2.2), (0.06, 0.06, 0.32), dark)
+    b.box((0, 0, 2.42), (0.17, 0.17, 0.17), glow)
+    return b
+
+
 BUILDERS = [make_cat, make_dog, make_fox, make_panda, make_frog, make_monkey,
-            make_lion, make_tiger, make_koala, make_penguin, make_guide]
+            make_lion, make_tiger, make_koala, make_penguin, make_guide, make_robot]
 
 
 # ---------------------------------------------------------------- scene
@@ -427,15 +466,19 @@ def main():
     cam.data.shift_y = (ymin - margin * S + S / 2) / S
     print(f"ORTHO_SCALE {S:.3f} SHIFT_Y {cam.data.shift_y:.3f}")
 
+    # framing above always uses ALL characters, so a subset render matches the rest
+    only = [s for s in os.environ.get("SPRITE_CHARS", "").split(",") if s]
     paths = []
     for b in chars:
-        for o in chars:
-            o.coll.hide_render = o is not b
         path = os.path.join(OUT_DIR, b.coll.name + ".png")
-        sc.render.filepath = path
-        bpy.ops.render.render(write_still=True)
-        paths.append(path)
-        print("WROTE", path)
+        if not only or b.coll.name in only:
+            for o in chars:
+                o.coll.hide_render = o is not b
+            sc.render.filepath = path
+            bpy.ops.render.render(write_still=True)
+            print("WROTE", path)
+        if os.path.exists(path):
+            paths.append(path)
     contact_sheet(paths)
 
 
