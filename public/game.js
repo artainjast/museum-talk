@@ -4,6 +4,8 @@ import { UI, EXTRA, AVATARS, AVATAR_SPRITES, REACTIONS, ROOM_TITLES, EXHIBITS, S
 // ---------------------------------------------------------------- utils
 const T = 32;               // world px per tile
 const STEP_MS = 120;        // guide step repeat
+const TW = 64, TH = 32, WALL_TALL = 62, WALL_SHORT = 12; // isometric tile + wall heights (world px)
+const isoPt = (x, y) => [(x - y) * TW / 2, (x + y) * TH / 2];
 const VOTE_MS = 20000;
 const nf = new Intl.NumberFormat('fa-IR');
 const fa = n => nf.format(n);
@@ -22,6 +24,7 @@ const params = new URLSearchParams(location.search);
 const hasIO = typeof window.io === 'function';
 const role = (params.get('solo') === '1' || !hasIO) ? 'solo' : params.has('host') ? 'host' : 'visitor';
 const isGuide = role !== 'visitor';
+const ISO = params.get('flat') !== '1'; // isometric by default, /?flat=1 for top-down
 document.body.classList.add(role);
 
 // ---------------------------------------------------------------- state
@@ -60,6 +63,8 @@ for (const name of [...AVATAR_SPRITES, 'guide']) {
 function setFacing(a, dx, dy) {
   if (dx) { a.dir = 2; a.face = dx > 0 ? 1 : -1; }
   else if (dy) a.dir = dy > 0 ? 0 : 1;
+  // isometric: +x = screen down-right, +y = down-left, -x = up-left, -y = up-right
+  if (dx || dy) { a.isoRow = (dx > 0 || dy > 0) ? 0 : 1; a.isoFlip = dy > 0 || dx < 0; }
 }
 const AV_COLORS = ['#8e7cc3', '#4a7bd0', '#1f9e8f', '#d64545', '#d04f9a', '#5aa04a', '#5bb3e0', '#2f7a3f', '#e0735b', '#334'];
 
@@ -70,7 +75,10 @@ let vw = 0, vh = 0, dpr = 1, zoom = 2, zoomOut = false;
 const cam = { x: 0, y: 0, init: false };
 
 function computeZoom() {
-  if (zoomOut) zoom = Math.min(vw / ((RW + 1) * T), vh / ((RH + 1) * T));
+  if (ISO) {
+    if (zoomOut) zoom = Math.min(vw / ((RW + RH) * TW / 2 + 60), vh / ((RW + RH) * TH / 2 + 140));
+    else zoom = Math.min(Math.max(vw, vh) / 1000, Math.min(vw, vh) / 440);
+  } else if (zoomOut) zoom = Math.min(vw / ((RW + 1) * T), vh / ((RH + 1) * T));
   else zoom = Math.min(Math.max(vw, vh) / (20 * T), Math.min(vw, vh) / (9 * T));
 }
 function resize() {
@@ -90,7 +98,12 @@ function addWorldText(room, x, y, w, h, cls, html, id) {
   const d = document.createElement('div');
   d.className = 'wt ' + cls;
   if (id) d.id = id;
-  Object.assign(d.style, { left: x * T + 'px', top: y * T + 'px', width: w * T + 'px', height: h * T + 'px' });
+  if (ISO) {
+    const [cx, cy] = isoPt(x + w / 2, y + h / 2);
+    Object.assign(d.style, { left: cx - w * T / 2 + 'px', top: cy - h * T / 2 + 'px', width: w * T + 'px', height: h * T + 'px' });
+  } else {
+    Object.assign(d.style, { left: x * T + 'px', top: y * T + 'px', width: w * T + 'px', height: h * T + 'px' });
+  }
   d.innerHTML = html;
   world.appendChild(d);
   worldTexts.push({ el: d, room });
@@ -324,6 +337,240 @@ function drawActors(t) {
     if (!isGuide && me && (isMe || Math.max(Math.abs(a.x - me.x), Math.abs(a.y - me.y)) <= 3)) label = a.name;
     drawActor(c, a, t, { me: isMe, label });
   }
+}
+
+// ---------------------------------------------------------------- isometric renderer (default; /?flat=1 = top-down)
+const lowered = rooms.map(() => 0);        // per room block: 1 = back walls lowered (block is in front of the focus room)
+const EX_IMG = {};                          // optional exhibit pictures: /art/ex/<id>.png
+for (const e of exhibits) EX_IMG[e.id] = loadImg(`/art/ex/${e.id}.png`);
+
+function isoTileOnScreen(x, y, pad) {
+  const [px, py] = isoPt(x + .5, y + .5);
+  const hw = vw / 2 / zoom + pad, hh = vh / 2 / zoom + pad;
+  return Math.abs(px - cam.x) < hw && Math.abs(py - cam.y) < hh;
+}
+function diamond(c, x, y, lift = 0) {
+  const [nx, ny] = isoPt(x, y), [ex, ey] = isoPt(x + 1, y), [sx, sy] = isoPt(x + 1, y + 1), [wx, wy] = isoPt(x, y + 1);
+  c.beginPath(); c.moveTo(nx, ny - lift); c.lineTo(ex, ey - lift); c.lineTo(sx, sy - lift); c.lineTo(wx, wy - lift); c.closePath();
+}
+function quad(c, pts) { c.beginPath(); c.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < 4; i++) c.lineTo(pts[i][0], pts[i][1]); c.closePath(); }
+
+function isoGround() {
+  const c = gctx;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, ground.width, ground.height);
+  setWorldTransform(c, ground);
+  c.lineWidth = 1;
+  for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
+    const t = tileAt(x, y);
+    if (t === ' ' || t === '#') continue;
+    if (!isoTileOnScreen(x, y, 40)) continue;
+    let col = floorColor(x, y);
+    diamond(c, x, y);
+    c.fillStyle = col; c.strokeStyle = col; c.fill(); c.stroke();
+    if ((x + y) & 1) { c.fillStyle = 'rgba(0,0,0,.04)'; c.fill(); }
+    if (t === 'h') { c.fillStyle = 'rgba(255,138,61,.3)'; c.fill(); }
+    else if (t === 'a') { c.fillStyle = 'rgba(34,184,200,.3)'; c.fill(); }
+    else if (t === '=') { c.fillStyle = 'rgba(110,80,50,.18)'; c.fill(); }
+    const lt = light[blockRoomAt(x, y)] ?? 1;
+    if (lt < .995) { c.fillStyle = `rgba(11,10,16,${(1 - lt) * FOG_MAX})`; c.fill(); }
+  }
+  // vote zone borders
+  c.setLineDash([8, 6]); c.lineWidth = 2;
+  for (const k of ['h', 'a']) {
+    const z = zoneRect[k];
+    quad(c, [isoPt(z.x0, z.y0), isoPt(z.x1 + 1, z.y0), isoPt(z.x1 + 1, z.y1 + 1), isoPt(z.x0, z.y1 + 1)]);
+    c.strokeStyle = k === 'h' ? 'rgba(220,100,30,.75)' : 'rgba(20,140,160,.75)'; c.stroke();
+  }
+  c.setLineDash([]);
+}
+
+// Upright panel standing on the line (xa,ya)->(xb,yb) in tile space, from height z0 to z1 (world px).
+function drawPanel(c, xa, ya, xb, yb, z0, z1, id, glow, legs) {
+  const [ax, ay] = isoPt(xa, ya), [bx, by] = isoPt(xb, yb);
+  const P = (u, z) => [ax + (bx - ax) * u, ay + (by - ay) * u - z];
+  if (legs) {
+    c.strokeStyle = '#4a2a12'; c.lineWidth = 3;
+    for (const u of [.15, .85]) { const [lx, ly] = P(u, 0), [tx, ty] = P(u, z0 + 4); c.beginPath(); c.moveTo(lx, ly); c.lineTo(tx, ty); c.stroke(); }
+  }
+  quad(c, [P(0, z1), P(1, z1), P(1, z0), P(0, z0)]);
+  c.fillStyle = '#6b3f1d'; c.fill();
+  const bu = 4 / Math.hypot(bx - ax, by - ay), bz = 4, iu = 8 / Math.hypot(bx - ax, by - ay), iz = 7;
+  quad(c, [P(bu, z1 - bz), P(1 - bu, z1 - bz), P(1 - bu, z0 + bz), P(bu, z0 + bz)]);
+  c.fillStyle = '#b07a3e'; c.fill();
+  const u0 = iu, u1 = 1 - iu, zt = z1 - iz, zb = z0 + iz;
+  quad(c, [P(u0, zt), P(u1, zt), P(u1, zb), P(u0, zb)]);
+  c.fillStyle = '#fbf6ea'; c.fill();
+  const [ox, oy] = P(u0, zt), [rx2, ry2] = P(u1, zt);
+  const ux = rx2 - ox, uy = ry2 - oy, hh = zt - zb;
+  const img = EX_IMG[id];
+  c.save();
+  c.transform(ux, uy, 0, hh, ox, oy); // unit square -> panel face
+  if (img && img.ok) {
+    const w = Math.hypot(ux, uy), s = Math.min(1, hh / w); // keep the square picture's aspect
+    c.drawImage(img, (1 - s) / 2, 0, s, 1);
+  } else {
+    c.scale(1 / Math.hypot(ux, uy), 1 / hh);
+    const W = Math.hypot(ux, uy), fs = Math.min(W, hh) * .6;
+    c.font = `${fs}px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(EXHIBITS[id]?.icon || '🖼️', W / 2, hh / 2 + 1);
+  }
+  c.restore();
+  if (glow) {
+    quad(c, [P(-.02, z1 + 3), P(1.02, z1 + 3), P(1.02, z0 - 3), P(-.02, z0 - 3)]);
+    c.strokeStyle = '#ffcf33'; c.lineWidth = 3; c.stroke();
+  }
+}
+
+function drawWall(c, x, y, h, fog, frames, nearId) {
+  const [nx, ny] = isoPt(x, y), [ex, ey] = isoPt(x + 1, y), [sx, sy] = isoPt(x + 1, y + 1), [wx, wy] = isoPt(x, y + 1);
+  const faces = [
+    [[wx, wy], [sx, sy], [sx, sy - h], [wx, wy - h], '#3d3756'],      // south face (down-left)
+    [[sx, sy], [ex, ey], [ex, ey - h], [sx, sy - h], '#2c2740'],      // east face (down-right)
+    [[nx, ny - h], [ex, ey - h], [sx, sy - h], [wx, wy - h], '#5c5479'], // top
+  ];
+  for (const [a, b, cc, d, col] of faces) {
+    quad(c, [a, b, cc, d]);
+    c.fillStyle = col; c.strokeStyle = col; c.lineWidth = 1; c.fill(); c.stroke();
+    if (fog > .005) { c.fillStyle = `rgba(11,10,16,${fog})`; c.fill(); }
+  }
+  // baseboard on the south face
+  if (h > 20) { quad(c, [[wx, wy], [sx, sy], [sx, sy - 4], [wx, wy - 4]]); c.fillStyle = '#251f36'; c.fill(); }
+  if (frames && h > 30) {
+    // each wall tile paints only its own slice of the frame, so neighbouring wall tiles never cover it
+    c.save();
+    quad(c, [[wx, wy], [sx, sy], [sx, sy - h - 6], [wx, wy - h - 6]]); c.clip();
+    for (const e of frames) drawPanel(c, e.x0 + .08, y + 1, e.x1 + .92, y + 1, h * .22, h * .92, e.id, e.id === nearId, false);
+    if (fog > .005) { quad(c, [[wx, wy], [sx, sy], [sx, sy - h], [wx, wy - h]]); c.fillStyle = `rgba(11,10,16,${fog})`; c.fill(); }
+    c.restore();
+  }
+}
+
+function drawIsoRope(c, d) {
+  let a, b;
+  if (d.vertical) { a = [d.x0 + 1, d.y0 + .15]; b = [d.x0 + 1, d.y1 + .85]; }
+  else { a = [d.x0 + .15, d.y0 + 1]; b = [d.x1 + .85, d.y0 + 1]; }
+  const [ax, ay] = isoPt(...a), [bx, by] = isoPt(...b);
+  const post = (x, y) => {
+    c.fillStyle = 'rgba(0,0,0,.25)'; c.beginPath(); c.ellipse(x, y, 7, 3.5, 0, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#a77d22'; c.fillRect(x - 2.5, y - 22, 5, 22);
+    c.fillStyle = '#e8c45a'; c.beginPath(); c.arc(x, y - 23, 4.5, 0, Math.PI * 2); c.fill();
+  };
+  post(ax, ay);
+  c.strokeStyle = '#a3122a'; c.lineWidth = 5; c.lineCap = 'round';
+  c.beginPath(); c.moveTo(ax, ay - 20); c.quadraticCurveTo((ax + bx) / 2, (ay + by) / 2 - 8, bx, by - 20); c.stroke();
+  post(bx, by);
+}
+
+// Walls, frames, easels, ropes and actors, depth-sorted on one canvas.
+const wallFrames = new Map(); // wall tile index -> exhibits hung on its south face
+for (const e of exhibits) {
+  if (e.y0 !== rooms[e.room].y0) continue;
+  for (let x = e.x0; x <= e.x1; x++) {
+    const k = (e.y0 - 1) * MAP_W + x;
+    if (!wallFrames.has(k)) wallFrames.set(k, []);
+    wallFrames.get(k).push(e);
+  }
+}
+function isoScene(t, focusRoom) {
+  const c = actx;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, actors.width, actors.height);
+  setWorldTransform(c, actors);
+  const kl = 1 - Math.exp(-Math.min(.1, isoDt) * 5);
+  const f = focusRoom >= 0 ? rooms[focusRoom] : null;
+  for (const r of rooms) {
+    const target = f && (r.ox > f.ox || r.oy > f.oy) ? 1 : 0;
+    lowered[r.i] += (target - lowered[r.i]) * kl;
+  }
+  const items = [];
+  for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
+    if (tileAt(x, y) !== '#' || !isoTileOnScreen(x, y, 90)) continue;
+    const b = blockRoomAt(x, y), r = rooms[b];
+    const back = y === r.oy || x === r.ox;
+    const h = back ? WALL_TALL + (WALL_SHORT - WALL_TALL) * lowered[b] : WALL_SHORT;
+    const fog = (1 - (light[b] ?? 1)) * FOG_MAX;
+    // frames hang on the wall tile above an exhibit's first tile; draw them with that tile only
+    const fr = wallFrames.get(y * MAP_W + x) && y === r.oy ? wallFrames.get(y * MAP_W + x) : null;
+    items.push({ d: x + y + 1, k: 0, draw: () => drawWall(c, x, y, h, fog, fr, nearId) });
+  }
+  for (const e of exhibits) {
+    if (e.y0 === rooms[e.room].y0) continue; // wall-mounted
+    if (!isoTileOnScreen(e.x0, e.y0, 120)) continue;
+    const yy = e.y0 + .55;
+    items.push({ d: (e.x0 + e.x1 + 1) / 2 + yy + .4, k: 1, draw: () => drawPanel(c, e.x0 + .05, yy, e.x1 + .95, yy, 10, 52, e.id, e.id === nearId, true) });
+  }
+  for (const d of doors) {
+    if (d.room <= S.unlocked) continue;
+    items.push({ d: (d.x0 + d.x1 + 1) / 2 + (d.y0 + d.y1 + 1) / 2, k: 1, draw: () => drawIsoRope(c, d) });
+  }
+  const me = S.me != null ? S.players.get(S.me) : null;
+  const labels = [];
+  const addActor = (a, opts) => items.push({ d: a.rx + a.ry + 1, k: 2, draw: () => drawIsoActor(c, a, t, opts, labels) });
+  for (const p of S.players.values()) {
+    if (!isoTileOnScreen(p.rx, p.ry, 80)) continue;
+    const isMe = p === me;
+    let label = null;
+    if (!isGuide && me && (isMe || Math.max(Math.abs(p.x - me.x), Math.abs(p.y - me.y)) <= 3)) label = p.name;
+    addActor(p, { me: isMe, label });
+  }
+  addActor(S.guide, { guide: true, label: UI.guide });
+  items.sort((a, b) => a.d - b.d || a.k - b.k);
+  if (tapMark && tapMark.until > t) {
+    const k = (tapMark.until - t) / 900;
+    const [mx, my] = isoPt(tapMark.x + .5, tapMark.y + .5);
+    c.strokeStyle = `rgba(25,211,240,${k})`; c.lineWidth = 3;
+    c.beginPath(); c.ellipse(mx, my, TW * (.42 - k * .15), TH * (.42 - k * .15), 0, 0, Math.PI * 2); c.stroke();
+  }
+  for (const it of items) it.draw();
+  for (const l of labels) l();
+}
+let isoDt = 0;
+
+const ISO_D = 76, ISO_GUIDE_D = 86;
+function drawIsoActor(c, a, t, opts, labels) {
+  const [cx, feet] = isoPt(a.rx + .5, a.ry + .5);
+  const moving = Math.abs(a.rx - a.x) + Math.abs(a.ry - a.y) > .04;
+  c.fillStyle = 'rgba(0,0,0,.22)';
+  c.beginPath(); c.ellipse(cx, feet, TW * .26, TH * .26, 0, 0, Math.PI * 2); c.fill();
+  if (opts.me) {
+    c.strokeStyle = '#19d3f0'; c.lineWidth = 3;
+    c.beginPath(); c.ellipse(cx, feet, TW * .36 + Math.sin(t / 250) * 2, TH * .36 + Math.sin(t / 250), 0, 0, Math.PI * 2); c.stroke();
+  }
+  const sname = opts.guide ? 'guide' : AVATAR_SPRITES[a.avatar];
+  const img = SPR[sname], sheet = SHEET[sname];
+  const D = opts.guide ? ISO_GUIDE_D : ISO_D;
+  const flip = a.isoFlip;
+  let headY;
+  const bob = moving ? Math.abs(Math.sin(t / 70)) * 3 : 0;
+  c.save();
+  if (flip) { c.translate(cx, 0); c.scale(-1, 1); c.translate(-cx, 0); }
+  if (sheet && sheet.ok) {
+    const col = moving ? 1 + (Math.floor(t / 120 + (a.phase || 0)) % 4) : 0;
+    c.drawImage(sheet, col * 128, (a.isoRow || 0) * 128, 128, 128, cx - D / 2, feet - D * (124 / 128), D, D);
+    headY = feet - D * (opts.guide ? .93 : .78);
+  } else if (img && img.ok) {
+    c.drawImage(img, cx - D / 2, feet - D * (124 / 128) - bob, D, D);
+    headY = feet - D * (opts.guide ? .93 : .78) - bob;
+  } else {
+    const r = opts.guide ? 20 : 15, cy = feet - r - 2 - bob;
+    c.fillStyle = opts.guide ? '#f2b61f' : AV_COLORS[a.avatar % AV_COLORS.length];
+    c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.fill();
+    c.font = `${r * 1.15}px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(opts.guide ? '🚩' : AVATARS[a.avatar], cx, cy + 1);
+    headY = cy - r;
+  }
+  c.restore();
+  if (opts.label) labels.push(() => drawLabel(c, opts.label, cx, headY - 8, opts.guide));
+  if (a.react && a.react.until > t) labels.push(() => drawReaction(c, a.react, cx, headY - (opts.label ? 30 : 8), t));
+}
+
+// screen px -> tile
+function screenToTile(sx, sy) {
+  const wx = (sx - vw / 2) / zoom + cam.x, wy = (sy - vh / 2) / zoom + cam.y;
+  if (!ISO) return [Math.floor(wx / T), Math.floor(wy / T)];
+  const a = wx / (TW / 2), b = wy / (TH / 2);
+  return [Math.floor((a + b) / 2), Math.floor((b - a) / 2)];
 }
 
 // ---------------------------------------------------------------- overlays
@@ -690,8 +937,7 @@ function startVisitor() {
 }
 $('stage').addEventListener('pointerup', ev => {
   if (role !== 'visitor' || !joined) return;
-  const wx = (ev.clientX - vw / 2) / zoom + cam.x, wy = (ev.clientY - vh / 2) / zoom + cam.y;
-  const x = Math.floor(wx / T), y = Math.floor(wy / T);
+  const [x, y] = screenToTile(ev.clientX, ev.clientY);
   if (isWalkable(x, y, S.unlocked) && blockRoomAt(x, y) <= S.discovered) visitorGoto(x, y);
 });
 
@@ -815,7 +1061,10 @@ function frame() {
   let tx, ty;
   const meP = S.me != null ? S.players.get(S.me) : null;
   const focus = (meP && t < manualUntil) ? meP : S.guide;
-  if (zoomOut && S.room >= 0 && focus === S.guide) { tx = rooms[S.room].cx * T; ty = rooms[S.room].cy * T; }
+  if (zoomOut && S.room >= 0 && focus === S.guide) {
+    if (ISO) [tx, ty] = isoPt(rooms[S.room].cx, rooms[S.room].cy), ty -= 30;
+    else { tx = rooms[S.room].cx * T; ty = rooms[S.room].cy * T; }
+  } else if (ISO) { [tx, ty] = isoPt(focus.rx + .5, focus.ry + .5); ty -= 30; }
   else { tx = (focus.rx + .5) * T; ty = (focus.ry + .5) * T; }
   if (!cam.init) { cam.x = tx; cam.y = ty; cam.init = true; }
   const kc = 1 - Math.exp(-dt * 7);
@@ -824,8 +1073,14 @@ function frame() {
 
   updatePlaque(t);
   renderVote(t);
-  drawGround(nearId);
-  drawActors(t);
+  if (ISO) {
+    isoDt = dt;
+    isoGround();
+    isoScene(t, blockRoomAt(focus.x, focus.y));
+  } else {
+    drawGround(nearId);
+    drawActors(t);
+  }
   requestAnimationFrame(frame);
 }
 

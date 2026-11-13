@@ -44,6 +44,18 @@ COLS = [(0, False), (1, False), (0, True), (-1, False), (0, True)]
 
 
 # ---------------------------------------------------------------- helpers
+def build_mirrored(fn):
+    """Character mirrored in local X. Used for the guide's side view so the flag
+    pole is in the near hand (a far-side flag hides behind the head)."""
+    B = LIB["Builder"]
+    orig = B.box
+    B.box = lambda self, c, s, col: orig(self, (-c[0], c[1], c[2]), s, col)
+    try:
+        return fn()
+    finally:
+        B.box = orig
+
+
 def mesh_objs(coll):
     return [o for o in coll.objects if o.type == "MESH"]
 
@@ -106,6 +118,8 @@ class Rig:
                 piv = Vector((c.x, 0.0, z1 - drop))
                 for o in objs:
                     set_origin(o, piv)
+                if group is arms and s == self.static_arm:
+                    self.shoulder = piv
         self.legs, self.arms = legs, arms
         for o in self.objs:
             o.parent = self.root
@@ -127,10 +141,16 @@ class Rig:
         self.root.location.z = -minz + lift_world  # lowest foot on the ground line
         bpy.context.view_layer.update()
 
-    def set_prop(self, rot_deg=0.0, slide=0.0, scale=1.0):
+    def set_prop(self, rot_deg=0.0, slide=0.0, scale=1.0, arm_deg=0.0):
+        """Flag pole: turn the flag about the pole, slide pole through the hand,
+        scale about the grip, and raise the holding arm (prop follows the hand)."""
+        for o in self.arms[self.static_arm]:
+            o.rotation_euler.x = math.radians(arm_deg)
+        R = Matrix.Rotation(math.radians(arm_deg), 3, "X")
+        g = self.shoulder + R @ (self.grip - self.shoulder)
         for o in self.prop:
             o.rotation_euler.z = math.radians(rot_deg)
-            o.location = self.grip - Vector((0, 0, slide))
+            o.location = g - Vector((0, 0, slide))
             o.scale = (scale, scale, scale)
         bpy.context.view_layer.update()
 
@@ -177,8 +197,10 @@ def main():
     half_w = S / 2 - 2 * px_w
     print(f"ORTHO_SCALE {S:.3f} SHIFT_Y {cam.data.shift_y:.3f} LIFT {lift_world:.4f}")
 
+    guide_m = build_mirrored(LIB["make_guide"])
     rigs = {b.coll.name: Rig(b, b.coll.name == "guide") for b in chars}
-    all_colls = [b.coll for b in chars]
+    rig_gm = Rig(guide_m, True)
+    all_colls = [b.coll for b in chars] + [guide_m.coll]
 
     only = [s for s in os.environ.get("WALK_CHARS", "").split(",") if s]
     names = [b.coll.name for b in chars if not only or b.coll.name in only]
@@ -188,26 +210,27 @@ def main():
         for name in names:
             sheet = np.zeros((3 * RES, 5 * RES, 4), dtype=np.float32)
             for row, view in enumerate(VIEWS):
-                rig = rigs[name]
+                rig = rig_gm if (name == "guide" and row == 2) else rigs[name]
                 for c in all_colls:
                     c.hide_render = c is not rig.coll
                 if rig.prop:
-                    # flag trails behind the walker in side view; fit the prop in frame
-                    rot = 90.0 * rig.static_arm if row == 2 else 0.0
-                    rig.set_prop(rot)
+                    # side: near hand raises the pole forward, flag points ahead
+                    rot = -90.0 * rig.static_arm if row == 2 else 0.0
+                    arm = -40.0 if row == 2 else 0.0
+                    rig.set_prop(rot, 0.0, 1.0, arm)
+                    slide, scale = 0.0, 1.0
                     if row != 0:
                         rig.pose(0, lift_world, view)  # highest pose of the cycle
-                        slide, scale = 0.0, 1.0
                         excess = bounds_cam(cam, rig.objs)[3] - top_lim
-                        if excess > 0:
-                            # back view: slide the pole down through the hand; side view:
-                            # keep the (trailing) flag above the head and shrink instead
-                            if row == 1:
-                                slide = min(excess / math.cos(ELEV) + 0.01, 0.35)
-                                rig.set_prop(rot, slide)
+                        if excess > 0:  # back view: slide pole down, then shrink
+                            slide = min(excess / math.cos(ELEV) + 0.01, 0.35)
+                            rig.set_prop(rot, slide, scale, arm)
                             while bounds_cam(cam, rig.objs)[3] > top_lim and scale > 0.5:
                                 scale -= 0.02
-                                rig.set_prop(rot, slide, scale)
+                                rig.set_prop(rot, slide, scale, arm)
+                        else:  # spare headroom: lift the flag clear of the head
+                            slide = -min(-excess / math.cos(ELEV) - 0.01, 0.2)
+                            rig.set_prop(rot, slide, scale, arm)
                         print(f"PROP {name} row{row}: slide {slide:.2f} scale {scale:.2f}")
                 for col, (fwd, lifted) in enumerate(COLS):
                     rig.pose(fwd, lift_world if lifted else 0.0, view)
