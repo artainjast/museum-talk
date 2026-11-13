@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14121c">
+<title>سافت اسکیل، هارد اسکیل جدیده</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="stage">
+  <canvas id="ground"></canvas>
+  <div id="world"></div>
+  <canvas id="actors"></canvas>
+</div>
+
+<div id="online" class="pill" hidden></div>
+<div id="reconnect" class="pill warn" hidden></div>
+<div id="banner"></div>
+<div id="vote" hidden></div>
+<button id="plaque" type="button" hidden></button>
+
+<div id="bar" hidden>
+  <div id="voteBtns" hidden>
+    <button type="button" data-v="h"></button>
+    <button type="button" data-v="a"></button>
+  </div>
+  <div id="reacts"></div>
+</div>
+
+<div id="card" class="modal" hidden>
+  <div class="sheet"><button type="button" class="x" data-close="card">×</button><div id="cardBody" class="ex"></div></div>
+</div>
+<div id="spot" hidden>
+  <button type="button" class="x" data-close="spot">×</button>
+  <div id="spotBody" class="ex big"></div>
+</div>
+<div id="help" class="modal" hidden><div class="sheet" id="helpBody"></div></div>
+
+<form id="join" hidden autocomplete="off">
+  <div class="join-box">
+    <h1 id="joinTitle"></h1>
+    <p class="join-sub" dir="ltr">Leading People, Leading Agents</p>
+    <label id="avatarLabel"></label>
+    <div id="avatars"></div>
+    <label for="nameInput" id="nameLabel"></label>
+    <input id="nameInput" maxlength="16" enterkeyhint="go">
+    <button type="submit" id="joinBtn"></button>
+  </div>
+</form>
+
+<script src="/socket.io/socket.io.js"></script>
+<script type="module" src="/game.js"></script>
+</body>
+</html>
