@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
-import { MAP_W, MAP_H, rooms, zones, isWalkable, blockRoomAt, tileAt } from './public/map.js';
+import { MAP_W, MAP_H, rooms, zones, isWalkable, blockRoomAt, tileAt, SECRET_ROOM } from './public/map.js';
 import { UI, EXHIBITS, BOT_NAMES } from './public/content.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -32,7 +32,9 @@ const MANUAL_MS = 8000; // a visitor who moved themselves resumes following the 
 const st = {
   gx: rooms[0].spawn.x, gy: rooms[0].spawn.y,
   unlocked: 0,
-  discovered: 0, // highest room the guide has walked into; visitors may not enter rooms beyond it
+  discovered: 0, // highest main room the guide has walked into; visitors may not enter rooms beyond it
+  secret: false,     // hidden door (room 4 -> secret abyss hall) open
+  secretSeen: false, // guide has walked into the secret hall
   spotlight: null,
   vote: { idx: -1, endsAt: 0, revealed: false, counts: [0, 0] }, // endsAt: Date.now() ms
 };
@@ -53,7 +55,9 @@ for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) lava[y * MAP_W +
 function rebuildWalk() {
   for (let i = 0; i < N; i++) {
     const x = i % MAP_W, y = (i / MAP_W) | 0;
-    pass[i] = isWalkable(x, y, st.unlocked) && blockRoomAt(x, y) <= st.discovered ? 1 : 0;
+    const b = blockRoomAt(x, y);
+    const open = b === SECRET_ROOM ? st.secretSeen : b <= st.discovered;
+    pass[i] = isWalkable(x, y, st.unlocked, st.secret) && open ? 1 : 0;
     walk[i] = pass[i] && !lava[i] ? 1 : 0;
   }
 }
@@ -193,6 +197,8 @@ function clearChoices() {
 const metaMsg = () => ({
   unlocked: st.unlocked,
   discovered: st.discovered,
+  secret: st.secret,
+  secretSeen: st.secretSeen,
   spotlight: st.spotlight,
   vote: { idx: st.vote.idx, remaining: Math.max(0, st.vote.endsAt - Date.now()), revealed: st.vote.revealed, counts: st.vote.counts },
 });
@@ -207,9 +213,11 @@ function applyHostState(s) {
   if (Number.isInteger(un) && un >= 0 && un < ROOMS && un !== st.unlocked) { st.unlocked = un; walkChanged = true; }
   const dv = Number(s.discovered);
   if (Number.isInteger(dv) && dv >= 0 && dv < ROOMS && dv !== st.discovered) { st.discovered = dv; walkChanged = true; }
+  if (typeof s.secret === 'boolean' && s.secret !== st.secret) { st.secret = s.secret; walkChanged = true; }
+  if (typeof s.secretSeen === 'boolean' && s.secretSeen !== st.secretSeen) { st.secretSeen = s.secretSeen; walkChanged = true; }
   if (walkChanged) { rebuildWalk(); zoneFields.clear(); fieldDirty = true; meta = true; }
   const x = Number(s.x), y = Number(s.y);
-  if (Number.isInteger(x) && Number.isInteger(y) && (x !== st.gx || y !== st.gy) && isWalkable(x, y, st.unlocked)) {
+  if (Number.isInteger(x) && Number.isInteger(y) && (x !== st.gx || y !== st.gy) && isWalkable(x, y, st.unlocked, st.secret)) {
     st.gx = x; st.gy = y; fieldDirty = true; guideDirty = true;
   }
   const sp = s.spotlight === null || (typeof s.spotlight === 'string' && EXHIBITS[s.spotlight]) ? s.spotlight : st.spotlight;
@@ -253,6 +261,16 @@ io.on('connection', socket => {
   socket.on('host:state', safe((s) => {
     if (socket.id !== hostId) return;
     applyHostState(s);
+  }));
+
+  // jumps are cosmetic: just relay them (guide = id 0)
+  let lastJump = 0;
+  socket.on('host:jump', safe(() => { if (socket.id === hostId) io.emit('j', 0); }));
+  socket.on('jump', safe(() => {
+    const p = players.get(socket.data.pid), t = Date.now();
+    if (!p || t - lastJump < 450) return;
+    lastJump = t;
+    io.emit('j', p.id);
   }));
 
   socket.on('join', safe((msg) => {

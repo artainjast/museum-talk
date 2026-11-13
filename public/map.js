@@ -9,11 +9,13 @@
 //
 // Each room is RW x RH tiles including its 1-tile wall. Rooms are laid out as a snake:
 //   [0][1][2][3]
-//   [7][6][5][4]      7 = secret abyss hall (hidden door, opened by the Konami code or N)
+//      [6][5][4][7]   7 = secret abyss hall behind a hidden door in room 4 (Konami code or O)
 // Doorways are 3 tiles wide and 2 tiles deep (both rooms' walls).
 
 export const RW = 24, RH = 14;
-const ROOM_GRID = [[0, 0], [1, 0], [2, 0], [3, 0], [3, 1], [2, 1], [1, 1], [0, 1]];
+const ROOM_GRID = [[0, 0], [1, 0], [2, 0], [3, 0], [3, 1], [2, 1], [1, 1], [4, 1]];
+// Doors as [from, to]; a door belongs to the room it leads into.
+const DOOR_LINKS = [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [4, 7]];
 export const PROPS = 'onpkdmc';
 
 const E = '......................'; // empty 22-wide interior row
@@ -91,19 +93,19 @@ const INTERIORS = [
     E,
     '....qqqqqq....bbbb....',
   ],
-  [ // 7 secret abyss hall
-    'LLLLLLLLLLL....1111...',
-    'LLLLLLLLLL............',
-    'LLLLLLLLLL............',
-    'LLLLLLLLL.....o.......',
-    'LLLLLLLLL.............',
-    'LLLLL.................',
-    'LLLLL............S....',
-    'LLLLLLLLL.............',
-    'LLLLLLLLL.....o.......',
-    'LLLLLLLLLL............',
-    'LLLLLLLLLL............',
-    'LLLLLLLLLLL...........',
+  [ // 7 secret abyss hall (entered from room 4 on the west; the abyss is on the far side)
+    '...1111....LLLLLLLLLLL',
+    '............LLLLLLLLLL',
+    '............LLLLLLLLLL',
+    '.......o.....LLLLLLLLL',
+    '.............LLLLLLLLL',
+    '.................LLLLL',
+    '....S............LLLLL',
+    '.............LLLLLLLLL',
+    '.......o.....LLLLLLLLL',
+    '............LLLLLLLLLL',
+    '............LLLLLLLLLL',
+    '...........LLLLLLLLLLL',
   ],
 ];
 
@@ -119,7 +121,7 @@ const EXHIBIT_KEYS = [
 ];
 export const SECRET_ROOM = 7;
 
-const GW = 4, GH = 2;
+const GW = 5, GH = 2;
 export const MAP_W = GW * RW, MAP_H = GH * RH;
 
 const g = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(' '));
@@ -141,8 +143,8 @@ export const blockRoomAt = (x, y) => (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H
 // Doors between consecutive rooms. `room` = the room the door leads into.
 export const doors = [];
 const doorIdx = new Map();
-for (let i = 1; i < ROOM_GRID.length; i++) {
-  const [ax, ay] = ROOM_GRID[i - 1], [bx, by] = ROOM_GRID[i];
+for (const [from, i] of DOOR_LINKS) {
+  const [ax, ay] = ROOM_GRID[from], [bx, by] = ROOM_GRID[i];
   let d;
   if (ay === by) {
     const x = Math.max(ax, bx) * RW;
@@ -193,10 +195,13 @@ export const tileAt = (x, y) => (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) ? '
 export const roomAt = (x, y) => (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) ? -1 : roomIdx[y * MAP_W + x];
 export const doorRoomAt = (x, y) => doorIdx.get(y * MAP_W + x) ?? -1;
 
-export function isWalkable(x, y, unlocked) {
+// unlocked: main rooms 0..6 open in order; secret: the hidden door to room 7 is open.
+export function isWalkable(x, y, unlocked, secret = false) {
   const c = tileAt(x, y);
   if (c === '.' || c === 'S' || c === 'h' || c === 'a' || c === 'L') return true;
-  return c === '=' && doorRoomAt(x, y) <= unlocked;
+  if (c !== '=') return false;
+  const r = doorRoomAt(x, y);
+  return r === SECRET_ROOM ? !!secret : r <= unlocked;
 }
 
 // Chebyshev distance from tile (x, y) to an exhibit's rectangle.
@@ -209,7 +214,7 @@ export function exDist(e, x, y) {
 // First interior tile behind each room's entrance door (room 0: its spawn).
 rooms.forEach((r, i) => {
   if (i === 0) { r.entry = r.spawn; return; }
-  const d = doors[i - 1];
+  const d = doors.find(dd => dd.room === i);
   const mx = Math.floor((d.x0 + d.x1) / 2), my = Math.floor((d.y0 + d.y1) / 2);
   const cands = d.vertical ? [[d.x1 + 1, my], [d.x0 - 1, my]] : [[mx, d.y1 + 1], [mx, d.y0 - 1]];
   const [x, y] = cands.find(([x, y]) => roomAt(x, y) === i);

@@ -31,7 +31,8 @@ document.body.classList.add(role);
 const S = {
   guide: { x: rooms[0].spawn.x, y: rooms[0].spawn.y, rx: 0, ry: 0, face: 1 },
   unlocked: 0,
-  discovered: 0, // highest room the guide has walked into (fog of war)
+  discovered: 0, // highest main room the guide has walked into (fog of war)
+  secret: false, secretSeen: false, // hidden door in room 4 open / guide has been inside the secret hall
   spotlight: null,
   vote: { idx: -1, endsAt: 0, revealed: false, counts: [0, 0] }, // endsAt in performance.now() ms
   players: new Map(),  // visitor avatars (phase B)
@@ -41,16 +42,18 @@ const S = {
 
 if (isGuide) {
   const saved = store.get('museum.guide');
-  if (saved && Number.isInteger(saved.x) && Number.isInteger(saved.unlocked) && isWalkable(saved.x, saved.y, saved.unlocked) && tileAt(saved.x, saved.y) !== 'L') {
+  if (saved && Number.isInteger(saved.x) && Number.isInteger(saved.unlocked) && isWalkable(saved.x, saved.y, saved.unlocked, saved.secret) && tileAt(saved.x, saved.y) !== 'L') {
     S.guide.x = saved.x; S.guide.y = saved.y; S.unlocked = saved.unlocked;
     S.discovered = Number.isInteger(saved.discovered) ? Math.min(saved.discovered, saved.unlocked) : 0;
+    S.secret = !!saved.secret; S.secretSeen = !!saved.secretSeen;
   }
 }
 S.guide.rx = S.guide.x; S.guide.ry = S.guide.y;
 const FOG_MAX = .62;   // undiscovered rooms are shadowed, not black
 const PREV_LIGHT = .45; // rooms the guide already left are dimmer than the current one
-const light = rooms.map(r => (r.i <= S.discovered ? 1 : 0));
-const saveGuide = () => store.set('museum.guide', { x: S.guide.x, y: S.guide.y, unlocked: S.unlocked, discovered: S.discovered });
+const roomSeen = i => (i === SECRET_ROOM ? S.secretSeen : i <= S.discovered);
+const light = rooms.map(r => (roomSeen(r.i) ? 1 : 0));
+const saveGuide = () => store.set('museum.guide', { x: S.guide.x, y: S.guide.y, unlocked: S.unlocked, discovered: S.discovered, secret: S.secret, secretSeen: S.secretSeen });
 
 // ---------------------------------------------------------------- sprites
 // Single-frame sprites, plus optional walk sheets: 5 cols (idle + 4 walk frames) x 3 rows (down, up, side-right), 128px cells.
@@ -123,7 +126,7 @@ function addWorldText(room, x, y, w, h, cls, html, id) {
 }
 
 // ---------------------------------------------------------------- drawing
-const FLOOR = ['#efe8dc', '#e8e3ef', '#e3ebe4', '#f1e6e1', '#efe9d6', '#e3eaf0', '#ece5f0'];
+const FLOOR = ['#efe8dc', '#e8e3ef', '#e3ebe4', '#f1e6e1', '#efe9d6', '#e3eaf0', '#ece5f0', '#d8d0c4'];
 const hash = (x, y) => (((x * 73856093) ^ (y * 19349663)) >>> 0);
 
 function floorColor(x, y) {
@@ -248,7 +251,7 @@ const EMOJI_FONT = '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans
 const SPR_D = T * 1.8, GUIDE_D = T * 2.1;
 
 function drawActor(c, a, t, opts) {
-  const cx = a.rx * T + T / 2, feet = a.ry * T + T * .86;
+  const cx = a.rx * T + T / 2, feet = a.ry * T + T * .86 - jumpZ(a, t) * .6;
   const moving = Math.abs(a.rx - a.x) + Math.abs(a.ry - a.y) > .04;
   const bob = moving ? Math.abs(Math.sin(t / 70)) * 3 : 0;
   c.fillStyle = 'rgba(0,0,0,.22)';
@@ -362,7 +365,7 @@ function diamond(c, x, y, lift = 0) {
 function quad(c, pts) { c.beginPath(); c.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < 4; i++) c.lineTo(pts[i][0], pts[i][1]); c.closePath(); }
 
 // The secret room's door looks like plain wall until it is unlocked (Konami code or N from room 6).
-const isHiddenDoor = (x, y) => tileAt(x, y) === '=' && doorRoomAt(x, y) === SECRET_ROOM && SECRET_ROOM > S.unlocked;
+const isHiddenDoor = (x, y) => tileAt(x, y) === '=' && doorRoomAt(x, y) === SECRET_ROOM && !S.secret;
 const FLAT_PROP = { o: '⚪', n: '🪑', p: '🪴', k: '💻', d: '🦆', m: '🫖', c: '☕' };
 const LAVA_DEPTH = 14;   // how far below the floor a falling actor is clipped
 const ABYSS_DEPTH = 90;  // visible cliff height of the abyss walls
@@ -477,6 +480,20 @@ function drawConfetti(dt) {
   }
 }
 let guideSay = null, guideClicks = 0;
+// Jumping: purely visual hop, synced to everyone (guide = id 0).
+const JUMP_MS = 520, JUMP_H = 28;
+const jumpZ = (a, t) => { const k = a.jumpAt ? (t - a.jumpAt) / JUMP_MS : 1; return k >= 0 && k < 1 ? Math.sin(Math.PI * k) * JUMP_H : 0; };
+let lastJumpAt = 0;
+function jump() {
+  const t = now();
+  if (t - lastJumpAt < 450) return;
+  lastJumpAt = t;
+  if (isGuide) { S.guide.jumpAt = t; if (role === 'host' && sock?.connected) sock.emit('host:jump'); return; }
+  const meP = S.me != null ? S.players.get(S.me) : null;
+  if (!meP || !sock) return;
+  meP.jumpAt = t;
+  sock.emit('jump');
+}
 // Robot agents wear a tiny name sticker in their company's colour (a name badge, not a logo).
 const STICKER = new Map(BOT_NAMES.map(b => [b.name, b]));
 function drawSticker(c, name, x, y) {
@@ -789,7 +806,8 @@ function drawIsoActor(c, a, t, opts, labels) {
   if (tileAt(a.x, a.y) === 'L') { if (!a.lavaAt) a.lavaAt = t; } else a.lavaAt = 0;
   const sink = a.lavaAt ? Math.min(1, (t - a.lavaAt) / 1100) : 0;
   const Dsz = opts.guide ? ISO_GUIDE_D : ISO_D;
-  const feet = feet0 + (sink ? sink * sink * 150 : 0);
+  const jz = jumpZ(a, t);
+  const feet = feet0 + (sink ? sink * sink * 150 : 0) - jz;
   if (sink) {
     if (sink < .6) labels.push(() => {
       c.globalAlpha = 1 - sink / .6;
@@ -802,10 +820,10 @@ function drawIsoActor(c, a, t, opts, labels) {
     c.globalAlpha = 1 - sink * .7;
   }
   c.fillStyle = 'rgba(0,0,0,.22)';
-  if (!sink) { c.beginPath(); c.ellipse(cx, feet, TW * .26, TH * .26, 0, 0, Math.PI * 2); c.fill(); }
+  if (!sink) { const sh = 1 - jz / (JUMP_H * 2.2); c.beginPath(); c.ellipse(cx, feet0, TW * .26 * sh, TH * .26 * sh, 0, 0, Math.PI * 2); c.fill(); }
   if (opts.me) {
     c.strokeStyle = '#19d3f0'; c.lineWidth = 3;
-    c.beginPath(); c.ellipse(cx, feet, TW * .36 + Math.sin(t / 250) * 2, TH * .36 + Math.sin(t / 250), 0, 0, Math.PI * 2); c.stroke();
+    c.beginPath(); c.ellipse(cx, feet0, TW * .36 + Math.sin(t / 250) * 2, TH * .36 + Math.sin(t / 250), 0, 0, Math.PI * 2); c.stroke();
   }
   const sname = opts.guide ? 'guide' : AVATAR_SPRITES[a.avatar];
   const img = SPR[sname], sheet = SHEET[sname];
@@ -876,7 +894,7 @@ function exhibitHTML(id, big) {
 
 function showBanner(r) {
   const b = $('banner');
-  b.textContent = fmt(UI.roomBanner, { n: fa(r), title: ROOM_TITLES[r] });
+  b.textContent = r === SECRET_ROOM ? '🕳️ ' + ROOM_TITLES[r] : fmt(UI.roomBanner, { n: fa(r), title: ROOM_TITLES[r] });
   b.classList.remove('show'); void b.offsetWidth; b.classList.add('show');
 }
 
@@ -991,7 +1009,7 @@ const voteOpen = t => S.vote.idx >= 0 && !S.vote.revealed && S.vote.endsAt > t;
 // ---------------------------------------------------------------- guide actions
 let sock = null;
 const hostState = () => ({
-  x: S.guide.x, y: S.guide.y, unlocked: S.unlocked, discovered: S.discovered, spotlight: S.spotlight,
+  x: S.guide.x, y: S.guide.y, unlocked: S.unlocked, discovered: S.discovered, secret: S.secret, secretSeen: S.secretSeen, spotlight: S.spotlight,
   vote: { idx: S.vote.idx, remaining: Math.max(0, Math.round(S.vote.endsAt - now())), revealed: S.vote.revealed },
 });
 function hostSend() {
@@ -1003,7 +1021,7 @@ function moveGuide(dx, dy) {
   if (g.fallAt) return; // sinking in lava
   setFacing(g, dx, dy);
   const nx = g.x + dx, ny = g.y + dy;
-  if (!isWalkable(nx, ny, S.unlocked)) return;
+  if (!isWalkable(nx, ny, S.unlocked, S.secret)) return;
   g.x = nx; g.y = ny;
   if (tileAt(nx, ny) === 'L') g.fallAt = now();
   saveGuide();
@@ -1012,16 +1030,24 @@ function moveGuide(dx, dy) {
 function teleport(i) {
   if (!rooms[i]) return;
   const e = rooms[i].entry;
-  S.unlocked = Math.max(S.unlocked, i);
+  if (i === SECRET_ROOM) { S.secret = true; S.unlocked = Math.max(S.unlocked, 4); }
+  else S.unlocked = Math.max(S.unlocked, i);
   S.guide.x = S.guide.rx = e.x; S.guide.y = S.guide.ry = e.y;
   saveGuide();
   hostSend('move'); hostSend('unlock');
 }
 function setUnlocked(n) {
-  S.unlocked = Math.max(0, Math.min(rooms.length - 1, n));
-  S.discovered = Math.max(Math.min(S.discovered, S.unlocked), roomAt(S.guide.x, S.guide.y));
+  S.unlocked = Math.max(0, Math.min(SECRET_ROOM - 1, n)); // N/B walk the main rooms; the secret door has its own switch
+  const gr = roomAt(S.guide.x, S.guide.y);
+  S.discovered = Math.max(Math.min(S.discovered, S.unlocked), gr < SECRET_ROOM ? gr : 0);
   saveGuide();
   hostSend('unlock');
+}
+function setSecret(on) {
+  S.secret = on;
+  if (!on && S.room !== SECRET_ROOM) S.secretSeen = false;
+  saveGuide();
+  hostSend();
 }
 function setSpotlight(id) {
   S.spotlight = id;
@@ -1039,6 +1065,7 @@ function resetAll() {
   setSpotlight(null);
   S.unlocked = 0;
   S.discovered = 0;
+  S.secret = false; S.secretSeen = false;
   teleport(0);
   setUnlocked(0);
 }
@@ -1062,7 +1089,7 @@ function konamiStep(code) {
 }
 function onKonami() {
   burst();
-  if (isGuide) { if (S.unlocked >= SECRET_ROOM - 1 && S.unlocked < SECRET_ROOM) setUnlocked(SECRET_ROOM); }
+  if (isGuide) { if (S.unlocked >= 4 && !S.secret) setSecret(true); }
   else if (joined) react(5);
 }
 
@@ -1107,6 +1134,8 @@ addEventListener('keydown', ev => {
         if (S.vote.idx >= 0 && !S.vote.revealed) setVote({ revealed: true, endsAt: Math.min(S.vote.endsAt, t) });
         break;
       case 'KeyK': toggleHelp(); break;
+      case 'KeyO': setSecret(!S.secret); break;
+      case 'Space': jump(); break;
       case 'Home': if (ev.shiftKey) resetAll(); break;
       default:
         if (ev.shiftKey && /^Digit[0-7]$/.test(code)) teleport(Number(code[5]));
@@ -1124,12 +1153,13 @@ addEventListener('keydown', ev => {
     const m = /^(?:Digit|Numpad)([1-5])$/.exec(code);
     if (m && joined) react(Number(m[1]) - 1);
     else if (code === 'KeyZ') { zoomOut = !zoomOut; computeZoom(); }
+    else if (code === 'Space') jump();
     else if (code === 'Escape') { if (cardId) closeCard(); else if (S.spotlight) closeOverlay('spot'); }
   }
 });
 
 // ---------------------------------------------------------------- networking (phase B)
-let joined = false, myVote = null, lastReactAt = 0;
+let joined = false, myVote = null, lastReactAt = 0, metaSeen = false;
 let manualUntil = 0, tapMark = null;
 const MANUAL_MS = 8000; // must match server: after this idle time the avatar follows the guide again
 function visitorStep(dx, dy) {
@@ -1158,8 +1188,10 @@ function upsertPlayer([id, x, y, avatar, name]) {
 }
 function applyMeta(m) {
   if (role === 'visitor') {
-    if (m.unlocked >= SECRET_ROOM && S.unlocked < SECRET_ROOM && S.unlocked > 0) burst();
+    if (m.secret && !S.secret && metaSeen) burst();
+    metaSeen = true;
     S.unlocked = m.unlocked;
+    S.secret = !!m.secret; S.secretSeen = !!m.secretSeen;
     S.discovered = m.discovered ?? S.discovered;
     if (m.spotlight !== S.spotlight) { S.spotlight = m.spotlight; spotDismissed = null; renderSpot(); }
     if (m.vote.idx !== S.vote.idx) myVote = null;
@@ -1173,7 +1205,7 @@ function applySnap(m) {
   for (const row of m.players) upsertPlayer(row);
   if (role === 'visitor') { S.guide.x = S.guide.rx = m.g[0]; S.guide.y = S.guide.ry = m.g[1]; cam.init = false; }
   applyMeta(m.meta);
-  for (const rm of rooms) light[rm.i] = rm.i > S.discovered ? 0 : PREV_LIGHT;
+  for (const rm of rooms) light[rm.i] = roomSeen(rm.i) ? PREV_LIGHT : 0;
   setOnline(m.n);
 }
 function react(i) {
@@ -1223,9 +1255,39 @@ function setupJoin() {
   $('join').hidden = false;
 }
 
+const TOUCH = matchMedia('(pointer: coarse)').matches;
+let joyDir = null, joyNext = 0;
+function setupJoystick() {
+  const joy = $('joy'), knob = joy.firstElementChild;
+  const move = e => {
+    const r = joy.getBoundingClientRect();
+    let dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+    const d = Math.hypot(dx, dy), max = r.width * .34;
+    if (d > max) { dx *= max / d; dy *= max / d; }
+    knob.style.transform = `translate(${dx}px, ${dy}px)`;
+    if (d < 12) { joyDir = null; return; }
+    let gx = 0, gy = 0;
+    if (ISO) { // screen direction -> isometric grid axis
+      const a = dx + 2 * dy, b = 2 * dy - dx;
+      if (Math.abs(a) > Math.abs(b)) gx = Math.sign(a); else gy = Math.sign(b);
+    } else if (Math.abs(dx) > Math.abs(dy)) gx = Math.sign(dx); else gy = Math.sign(dy);
+    const key = gx + ',' + gy;
+    if (!joyDir || joyDir.key !== key) { joyDir = { dx: gx, dy: gy, key }; visitorStep(gx, gy); joyNext = now() + STEP_MS * 1.4; }
+  };
+  const end = () => { joyDir = null; knob.style.transform = ''; };
+  joy.addEventListener('pointerdown', e => { joy.setPointerCapture(e.pointerId); move(e); });
+  joy.addEventListener('pointermove', e => { if (joy.hasPointerCapture(e.pointerId)) move(e); });
+  joy.addEventListener('pointerup', end);
+  joy.addEventListener('pointercancel', end);
+  $('jumpBtn').addEventListener('pointerdown', e => { e.preventDefault(); jump(); });
+  joy.hidden = false; $('jumpBtn').hidden = false;
+  document.body.classList.add('touch');
+}
+
 function startVisitor() {
   joined = true;
   $('bar').hidden = false;
+  if (TOUCH) setupJoystick();
   sendJoin();
   const h = $('hint');
   h.textContent = EXTRA.moveHint;
@@ -1242,7 +1304,7 @@ $('stage').addEventListener('pointerup', ev => {
     return;
   }
   const [x, y] = screenToTile(ev.clientX, ev.clientY);
-  if (isWalkable(x, y, S.unlocked) && tileAt(x, y) !== 'L' && blockRoomAt(x, y) <= S.discovered) visitorGoto(x, y);
+  if (isWalkable(x, y, S.unlocked, S.secret) && tileAt(x, y) !== 'L' && roomSeen(blockRoomAt(x, y))) visitorGoto(x, y);
 });
 
 function setupBar() {
@@ -1285,6 +1347,11 @@ if (role !== 'solo') {
   sock.on('meta', applyMeta);
   sock.on('c', counts => { S.vote.counts = counts; });
   sock.on('pjoin', upsertPlayer);
+  sock.on('j', id => {
+    if (id === 0) { if (role === 'visitor') S.guide.jumpAt = now(); return; }
+    const p = S.players.get(id);
+    if (p && !(id === S.me && now() - (p.jumpAt || 0) < 400)) p.jumpAt = now();
+  });
   sock.on('pleave', id => { S.players.delete(id); });
   sock.on('r', ([id, i]) => {
     const p = S.players.get(id);
@@ -1331,6 +1398,7 @@ function frame() {
   last = t;
 
   // guide stepping (local guide only)
+  if (joyDir && t >= joyNext) { visitorStep(joyDir.dx, joyDir.dy); joyNext = t + STEP_MS; }
   if (held.length && t >= nextStep) {
     const [dx, dy] = DIRS[held[held.length - 1]];
     if (isGuide) { if (!S.spotlight) moveGuide(dx, dy); }
@@ -1363,12 +1431,13 @@ function frame() {
   // room change
   const r = roomAt(S.guide.x, S.guide.y);
   if (r >= 0 && r !== S.room) { S.room = r; showBanner(r); }
-  if (isGuide && r > S.discovered) { S.discovered = r; saveGuide(); hostSend(); }
+  if (isGuide && r === SECRET_ROOM && !S.secretSeen) { S.secretSeen = true; saveGuide(); hostSend(); }
+  else if (isGuide && r >= 0 && r < SECRET_ROOM && r > S.discovered) { S.discovered = r; saveGuide(); hostSend(); }
 
   // fog of war fade
   const kl = 1 - Math.exp(-dt * 2.5);
   for (const rm of rooms) {
-    const target = rm.i > S.discovered ? 0 : rm.i === S.room ? 1 : PREV_LIGHT;
+    const target = !roomSeen(rm.i) ? 0 : rm.i === S.room ? 1 : PREV_LIGHT;
     light[rm.i] += (target - light[rm.i]) * kl;
     if (Math.abs(target - light[rm.i]) < .003) light[rm.i] = target;
   }
