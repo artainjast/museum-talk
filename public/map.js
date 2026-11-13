@@ -3,13 +3,13 @@
 // Legend:
 //   #  wall (inside a room: low partition)   .  floor        =  door tile (open only if its room is unlocked)
 //   h  vote zone "human"                     a  vote zone "agent"
-//   S  spawn tile of a room                  L  lava (guide + robot agents can step in and fall; visitors can't)
+//   S  spawn tile of a room                  L  abyss (guide + robot agents can jump in and fall; visitors can't)
 //   props (solid): o pillar, n bench, p plant, k desk, d rubber duck, m samovar, c coffee machine
 //   other digits / letters: exhibit anchors (see EXHIBIT_KEYS; a prop listed there is an easter egg with a plaque)
 //
 // Each room is RW x RH tiles including its 1-tile wall. Rooms are laid out as a snake:
 //   [0][1][2][3]
-//   [7][6][5][4]      7 = secret lava hall (hidden door, opened by the Konami code or N)
+//   [7][6][5][4]      7 = secret abyss hall (hidden door, opened by the Konami code or N)
 // Doorways are 3 tiles wide and 2 tiles deep (both rooms' walls).
 
 export const RW = 24, RH = 14;
@@ -91,7 +91,7 @@ const INTERIORS = [
     E,
     '....qqqqqq....bbbb....',
   ],
-  [ // 7 secret lava hall
+  [ // 7 secret abyss hall
     'LLLLLLLLLLL....1111...',
     'LLLLLLLLLL............',
     'LLLLLLLLLL............',

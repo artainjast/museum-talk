@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
 import { MAP_W, MAP_H, rooms, zones, isWalkable, blockRoomAt, tileAt } from './public/map.js';
-import { UI, EXHIBITS, BOT_NAME } from './public/content.js';
+import { UI, EXHIBITS, BOT_NAMES } from './public/content.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -26,7 +26,7 @@ const safe = fn => (...args) => { try { fn(...args); } catch (err) { console.err
 // ------------------------------------------------------------------ shared state
 const N = MAP_W * MAP_H;
 const ROOMS = rooms.length;
-const BOTS = Number(process.env.BOTS ?? 6); // robot dummy agents that blindly follow the guide (even into lava)
+const BOTS = Math.min(BOT_NAMES.length, Number(process.env.BOTS ?? BOT_NAMES.length)); // robot agents that blindly follow the guide (even into the abyss)
 const LAVA_RESPAWN_MS = 1500;
 const MANUAL_MS = 8000; // a visitor who moved themselves resumes following the guide after this idle time
 const st = {
@@ -345,7 +345,7 @@ io.on('connection', socket => {
 for (let k = 1; k <= BOTS; k++) {
   const p = {
     id: nextId++, sessionId: 'bot-' + k, socketId: null, connected: true, goneAt: 0, bot: true,
-    name: BOT_NAME.replace('{n}', nf.format(k)), avatar: 10, x: st.gx, y: st.gy, space: 1 + (k % 3), nextAt: 0,
+    name: BOT_NAMES[k - 1].name, avatar: 10, x: st.gx, y: st.gy, space: 1 + (k % 3), nextAt: 0,
     choice: null, target: null, goal: -1, manualUntil: 0, lastStep: 0, lastGoto: 0, fallAt: 0,
   };
   placeNear(p);

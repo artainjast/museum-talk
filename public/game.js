@@ -1,5 +1,5 @@
 import { MAP_W, MAP_H, RW, RH, rooms, doors, exhibits, props, zoneRect, tileAt, roomAt, doorRoomAt, blockRoomAt, isWalkable, exDist, SECRET_ROOM } from './map.js';
-import { UI, EXTRA, AVATARS, AVATAR_SPRITES, REACTIONS, ROOM_TITLES, EXHIBITS, SCENARIOS, VOTE_FINAL, HELP_KEYS, BOT_LINES } from './content.js';
+import { UI, EXTRA, AVATARS, AVATAR_SPRITES, REACTIONS, ROOM_TITLES, EXHIBITS, SCENARIOS, VOTE_FINAL, HELP_KEYS, BOT_LINES, BOT_NAMES } from './content.js';
 
 // ---------------------------------------------------------------- utils
 const T = 32;               // world px per tile
@@ -47,7 +47,8 @@ if (isGuide) {
   }
 }
 S.guide.rx = S.guide.x; S.guide.ry = S.guide.y;
-const FOG_MAX = .62; // undiscovered rooms are shadowed, not black
+const FOG_MAX = .62;   // undiscovered rooms are shadowed, not black
+const PREV_LIGHT = .45; // rooms the guide already left are dimmer than the current one
 const light = rooms.map(r => (r.i <= S.discovered ? 1 : 0));
 const saveGuide = () => store.set('museum.guide', { x: S.guide.x, y: S.guide.y, unlocked: S.unlocked, discovered: S.discovered });
 
@@ -346,8 +347,8 @@ function drawActors(t) {
 
 // ---------------------------------------------------------------- isometric renderer (default; /?flat=1 = top-down)
 const lowered = rooms.map(() => 0);        // per room block: 1 = back walls lowered (block is in front of the focus room)
-const EX_IMG = {};                          // optional exhibit pictures: /art/ex/<id>.png
-for (const e of exhibits) EX_IMG[e.id] = loadImg(`/art/ex/${e.id}.png`);
+const EX_IMG = {};                          // exhibit pictures: /art/ex/<id>.webp (emoji fallback if missing)
+for (const e of exhibits) EX_IMG[e.id] = loadImg(`/art/ex/${e.id}.webp`);
 
 function isoTileOnScreen(x, y, pad) {
   const [px, py] = isoPt(x + .5, y + .5);
@@ -363,7 +364,8 @@ function quad(c, pts) { c.beginPath(); c.moveTo(pts[0][0], pts[0][1]); for (let 
 // The secret room's door looks like plain wall until it is unlocked (Konami code or N from room 6).
 const isHiddenDoor = (x, y) => tileAt(x, y) === '=' && doorRoomAt(x, y) === SECRET_ROOM && SECRET_ROOM > S.unlocked;
 const FLAT_PROP = { o: '⚪', n: '🪑', p: '🪴', k: '💻', d: '🦆', m: '🫖', c: '☕' };
-const LAVA_DEPTH = 14;
+const LAVA_DEPTH = 14;   // how far below the floor a falling actor is clipped
+const ABYSS_DEPTH = 90;  // visible cliff height of the abyss walls
 
 const shadeCache = new Map();
 function shade(hex, f) {
@@ -475,6 +477,30 @@ function drawConfetti(dt) {
   }
 }
 let guideSay = null, guideClicks = 0;
+// Robot agents wear a tiny name sticker in their company's colour (a name badge, not a logo).
+const STICKER = new Map(BOT_NAMES.map(b => [b.name, b]));
+function drawSticker(c, name, x, y) {
+  const st = STICKER.get(name);
+  if (!st) return;
+  c.font = '800 8px Vazirmatn, system-ui, sans-serif';
+  c.direction = 'ltr'; c.textAlign = 'center'; c.textBaseline = 'middle';
+  const w = c.measureText(name).width + 7, h = 11;
+  c.save();
+  c.translate(x, y); c.rotate(-.08);
+  c.fillStyle = 'rgba(0,0,0,.25)'; roundRect(c, -w / 2 + 1, -h / 2 + 1, w, h, 3); c.fill();
+  c.fillStyle = st.bg; roundRect(c, -w / 2, -h / 2, w, h, 3); c.fill();
+  c.strokeStyle = 'rgba(255,255,255,.85)'; c.lineWidth = 1; c.stroke();
+  c.fillStyle = st.fg; c.fillText(name, 0, .5);
+  c.restore();
+}
+let lessonTimer = 0;
+function showLesson(text) {
+  const h = $('hint');
+  h.textContent = text;
+  h.classList.add('show', 'lesson');
+  clearTimeout(lessonTimer);
+  lessonTimer = setTimeout(() => h.classList.remove('show', 'lesson'), 6000);
+}
 
 function isoGround(now) {
   const c = gctx;
@@ -482,29 +508,38 @@ function isoGround(now) {
   c.clearRect(0, 0, ground.width, ground.height);
   setWorldTransform(c, ground);
   c.lineWidth = 1;
-  // pass 1: lava pit (drawn lower than the floor, animated)
+  // pass 1: the abyss (a bottomless pit with a faint fire glow far below)
   for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
     if (tileAt(x, y) !== 'L' || !isoTileOnScreen(x, y, 40)) continue;
-    const h = hash(x, y);
-    diamond(c, x, y, -LAVA_DEPTH);
-    const col = `hsl(${16 + 10 * Math.sin(now / 700 + (h % 100) / 16)}, 100%, ${48 + 7 * Math.sin(now / 430 + (h % 37))}%)`;
-    c.fillStyle = col; c.strokeStyle = col; c.fill(); c.stroke();
-    if ((h + Math.floor(now / 260)) % 37 === 0) {
+    const h = hash(x, y), w = Math.sin(now / 900 + (h % 100) / 16);
+    diamond(c, x, y);
+    c.fillStyle = '#07040c'; c.strokeStyle = '#07040c'; c.fill(); c.stroke();
+    c.fillStyle = `rgba(255,${80 + 30 * w | 0},25,${.1 + .06 * w})`; c.fill();
+    if (h % 7 === 0) { // embers drifting up out of the dark
+      const ph = (now / 1700 + (h % 100) / 100) % 1;
       const [bx, by] = isoPt(x + .5, y + .5);
-      c.fillStyle = '#ffe28a'; c.beginPath(); c.arc(bx, by + LAVA_DEPTH, 4, 0, Math.PI * 2); c.fill();
+      c.globalAlpha = 1 - ph;
+      c.fillStyle = '#ff9a3c'; c.beginPath(); c.arc(bx + Math.sin(ph * 7 + h) * 5, by + 20 - ph * 40, 1.8, 0, Math.PI * 2); c.fill();
+      c.globalAlpha = 1;
     }
     const lt = light[blockRoomAt(x, y)] ?? 1;
-    if (lt < .995) { diamond(c, x, y, -LAVA_DEPTH); c.fillStyle = `rgba(11,10,16,${(1 - lt) * FOG_MAX})`; c.fill(); }
+    if (lt < .995) { diamond(c, x, y); c.fillStyle = `rgba(11,10,16,${(1 - lt) * FOG_MAX})`; c.fill(); }
   }
   for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
     const t = tileAt(x, y);
     if (t === ' ' || t === '#' || t === 'L' || isHiddenDoor(x, y)) continue;
     if (!isoTileOnScreen(x, y, 40)) continue;
-    // cliff faces where the floor drops into lava
+    // cliff walls where the floor drops into the abyss (rock fading to black)
     if (tileAt(x, y + 1) === 'L' || tileAt(x + 1, y) === 'L') {
       const [ex, ey] = isoPt(x + 1, y), [sx, sy] = isoPt(x + 1, y + 1), [wx, wy] = isoPt(x, y + 1);
-      if (tileAt(x, y + 1) === 'L') { quad(c, [[wx, wy], [sx, sy], [sx, sy + LAVA_DEPTH], [wx, wy + LAVA_DEPTH]]); c.fillStyle = '#4a3026'; c.fill(); }
-      if (tileAt(x + 1, y) === 'L') { quad(c, [[sx, sy], [ex, ey], [ex, ey + LAVA_DEPTH], [sx, sy + LAVA_DEPTH]]); c.fillStyle = '#35221b'; c.fill(); }
+      const cliff = (a, b, col) => {
+        const g = c.createLinearGradient(0, Math.min(a[1], b[1]), 0, Math.max(a[1], b[1]) + ABYSS_DEPTH);
+        g.addColorStop(0, col); g.addColorStop(1, 'rgba(7,4,12,0)');
+        quad(c, [a, b, [b[0], b[1] + ABYSS_DEPTH], [a[0], a[1] + ABYSS_DEPTH]]); c.fillStyle = g; c.fill();
+        c.beginPath(); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); c.strokeStyle = 'rgba(255,255,255,.12)'; c.lineWidth = 1.5; c.stroke();
+      };
+      if (tileAt(x, y + 1) === 'L') cliff([wx, wy], [sx, sy], '#4d4150');
+      if (tileAt(x + 1, y) === 'L') cliff([sx, sy], [ex, ey], '#372e3c');
     }
     let col = floorColor(x, y);
     diamond(c, x, y);
@@ -526,6 +561,7 @@ function isoGround(now) {
     c.strokeStyle = k === 'h' ? 'rgba(220,100,30,.75)' : 'rgba(20,140,160,.75)'; c.stroke();
   }
   c.setLineDash([]);
+  drawLampPools(c, now);
 }
 
 // Upright panel standing on the line (xa,ya)->(xb,yb) in tile space, from height z0 to z1 (world px).
@@ -582,6 +618,23 @@ function drawWall(c, x, y, h, fog, frames, nearId) {
     if (i === 2) { quad(c, [a, b, cc, d]); c.strokeStyle = 'rgba(255,255,255,.08)'; c.stroke(); }
     if (fog > .005) { quad(c, [a, b, cc, d]); c.fillStyle = `rgba(11,10,16,${fog})`; c.fill(); }
   }
+  // rounded rim on the exposed top edges (bullnose), so walls read curved instead of sharp
+  const wallish = (xx, yy) => tileAt(xx, yy) === '#' || isHiddenDoor(xx, yy);
+  const openS = !wallish(x, y + 1), openE = !wallish(x + 1, y);
+  if (openS || openE) {
+    c.lineCap = 'round'; c.lineJoin = 'round';
+    c.beginPath();
+    if (openS) { c.moveTo(wx, wy - h); c.lineTo(sx, sy - h); }
+    if (openE) { if (!openS) c.moveTo(sx, sy - h); c.lineTo(ex, ey - h); }
+    c.strokeStyle = shade('#867cab', v); c.lineWidth = 4; c.stroke();
+    if (fog > .005) { c.strokeStyle = `rgba(11,10,16,${fog})`; c.stroke(); }
+    c.strokeStyle = `rgba(255,255,255,${.22 * (1 - fog)})`; c.lineWidth = 1.2; c.stroke();
+    if (openS && openE) { // soft vertical highlight on the outer corner
+      c.beginPath(); c.moveTo(sx, sy - h + 2); c.lineTo(sx, sy - 2);
+      c.strokeStyle = `rgba(255,255,255,${.1 * (1 - fog)})`; c.lineWidth = 3; c.stroke();
+    }
+    c.lineCap = 'butt';
+  }
   // baseboard on the south face
   if (h > 20) { quad(c, [[wx, wy], [sx, sy], [sx, sy - 4], [wx, wy - 4]]); c.fillStyle = '#251f36'; c.fill(); }
   if (frames && h > 30) {
@@ -620,6 +673,47 @@ for (const e of exhibits) {
     wallFrames.get(k).push(e);
   }
 }
+// Wall lamps on the tall back walls (skipping tiles that carry frames).
+const lamps = [];
+for (const r of rooms) {
+  for (let x = r.ox + 2; x < r.ox + RW - 1; x += 5) {
+    const y = r.oy, k = y * MAP_W + x;
+    if (tileAt(x, y) === '#' && !wallFrames.has(k) && !wallFrames.has(k - 1) && !wallFrames.has(k + 1)) lamps.push({ x, y, face: 'S', room: r.i });
+  }
+  for (let y = r.oy + 2; y < r.oy + RH - 1; y += 5) if (tileAt(r.ox, y) === '#') lamps.push({ x: r.ox, y, face: 'E', room: r.i });
+}
+const lampLevel = (l, t) => (light[l.room] ?? 0) * (l.room === 1 ? .3 : 1) * (.94 + .06 * Math.sin(t / 140 + l.x * 3 + l.y));
+function lampPoint(l, h) {
+  const [ex, ey] = isoPt(l.x + 1, l.y), [sx, sy] = isoPt(l.x + 1, l.y + 1), [wx, wy] = isoPt(l.x, l.y + 1);
+  const [a, b] = l.face === 'S' ? [[wx, wy], [sx, sy]] : [[sx, sy], [ex, ey]];
+  return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2 - h * .72];
+}
+function drawLampPools(c, t) {
+  for (const l of lamps) {
+    const L = lampLevel(l, t);
+    if (L < .03 || !isoTileOnScreen(l.x, l.y, 120)) continue;
+    const [px, py] = l.face === 'S' ? isoPt(l.x + .5, l.y + 1.9) : isoPt(l.x + 1.9, l.y + .5);
+    c.save(); c.translate(px, py); c.scale(1, .5);
+    const g = c.createRadialGradient(0, 0, 4, 0, 0, 78);
+    g.addColorStop(0, `rgba(255,214,130,${.2 * L})`); g.addColorStop(1, 'rgba(255,214,130,0)');
+    c.fillStyle = g; c.beginPath(); c.arc(0, 0, 78, 0, Math.PI * 2); c.fill();
+    c.restore();
+  }
+}
+function drawLamp(c, l, h, t) {
+  const [px, py] = lampPoint(l, h), L = lampLevel(l, t);
+  if (L > .03) {
+    const g = c.createRadialGradient(px, py + 3, 2, px, py + 3, 38);
+    g.addColorStop(0, `rgba(255,222,140,${.5 * L})`); g.addColorStop(1, 'rgba(255,222,140,0)');
+    c.fillStyle = g; c.beginPath(); c.arc(px, py + 3, 38, 0, Math.PI * 2); c.fill();
+  }
+  c.fillStyle = '#2a2233'; c.fillRect(px - 1.5, py - 9, 3, 7);                       // bracket
+  c.fillStyle = '#b8903f';                                                              // brass shade
+  c.beginPath(); c.moveTo(px - 7, py + 1); c.lineTo(px + 7, py + 1); c.lineTo(px + 3.5, py - 4); c.lineTo(px - 3.5, py - 4); c.closePath(); c.fill();
+  c.fillStyle = L > .03 ? `rgba(255,246,190,${.35 + .65 * L})` : '#5d5566';             // bulb
+  c.beginPath(); c.arc(px, py + 3.5, 3.4, 0, Math.PI * 2); c.fill();
+}
+
 function isoScene(t, focusRoom) {
   const c = actx;
   c.setTransform(1, 0, 0, 1, 0, 0);
@@ -641,6 +735,13 @@ function isoScene(t, focusRoom) {
     // frames hang on the wall tile above an exhibit's first tile; draw them with that tile only
     const fr = wallFrames.get(y * MAP_W + x) && y === r.oy ? wallFrames.get(y * MAP_W + x) : null;
     items.push({ d: x + y + 1, k: 0, draw: () => drawWall(c, x, y, h, fog, fr, nearId) });
+  }
+  for (const l of lamps) {
+    if (!isoTileOnScreen(l.x, l.y, 100)) continue;
+    const b = l.room, r = rooms[b];
+    const h = WALL_TALL + (WALL_SHORT - WALL_TALL) * lowered[b];
+    if (h < 40) continue;
+    items.push({ d: l.x + l.y + 2.5, k: 0, draw: () => drawLamp(c, l, h, t) });
   }
   for (const pr of props) {
     if (!isoTileOnScreen(pr.x, pr.y, 90)) continue;
@@ -664,7 +765,7 @@ function isoScene(t, focusRoom) {
     if (!isoTileOnScreen(p.rx, p.ry, 80)) continue;
     const isMe = p === me;
     let label = null;
-    if (!isGuide && me && (isMe || Math.max(Math.abs(p.x - me.x), Math.abs(p.y - me.y)) <= 3)) label = p.name;
+    if (p.avatar !== 10 && !isGuide && me && (isMe || Math.max(Math.abs(p.x - me.x), Math.abs(p.y - me.y)) <= 3)) label = p.name;
     addActor(p, { me: isMe, label });
   }
   addActor(S.guide, { guide: true, label: UI.guide });
@@ -684,20 +785,21 @@ const ISO_D = 76, ISO_GUIDE_D = 86;
 function drawIsoActor(c, a, t, opts, labels) {
   const [cx, feet0] = isoPt(a.rx + .5, a.ry + .5);
   const moving = Math.abs(a.rx - a.x) + Math.abs(a.ry - a.y) > .04;
-  // lava: sink below the surface with a flame
+  // abyss: fall down past the edge and vanish into the dark
   if (tileAt(a.x, a.y) === 'L') { if (!a.lavaAt) a.lavaAt = t; } else a.lavaAt = 0;
-  const sink = a.lavaAt ? Math.min(1, (t - a.lavaAt) / 900) : 0;
+  const sink = a.lavaAt ? Math.min(1, (t - a.lavaAt) / 1100) : 0;
   const Dsz = opts.guide ? ISO_GUIDE_D : ISO_D;
-  const feet = feet0 + (sink ? LAVA_DEPTH + sink * Dsz * .9 : 0);
+  const feet = feet0 + (sink ? sink * sink * 150 : 0);
   if (sink) {
-    labels.push(() => {
-      c.globalAlpha = 1 - sink * .6;
-      c.font = `${22 + Math.sin(t / 90) * 3}px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
-      c.fillText('🔥', cx, feet0 + LAVA_DEPTH - 10);
+    if (sink < .6) labels.push(() => {
+      c.globalAlpha = 1 - sink / .6;
+      c.font = `22px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText('😱', cx, feet0 - Dsz - 6);
       c.globalAlpha = 1;
     });
     c.save();
-    c.beginPath(); c.rect(cx - Dsz, feet0 + LAVA_DEPTH - Dsz * 2, Dsz * 2, Dsz * 2); c.clip();
+    c.beginPath(); c.rect(cx - Dsz, feet0 + 6 - Dsz * 2, Dsz * 2, Dsz * 2); c.clip();
+    c.globalAlpha = 1 - sink * .7;
   }
   c.fillStyle = 'rgba(0,0,0,.22)';
   if (!sink) { c.beginPath(); c.ellipse(cx, feet, TW * .26, TH * .26, 0, 0, Math.PI * 2); c.fill(); }
@@ -729,7 +831,8 @@ function drawIsoActor(c, a, t, opts, labels) {
     headY = cy - r;
   }
   c.restore();
-  if (sink) { c.restore(); return; }
+  if (a.avatar === 10 && !sink) drawSticker(c, a.name, cx, feet - Dsz * .34);
+  if (sink) { c.globalAlpha = 1; c.restore(); return; }
   if (opts.label) labels.push(() => drawLabel(c, opts.label, cx, headY - 8, opts.guide));
   if (a.react && a.react.until > t) labels.push(() => drawReaction(c, a.react, cx, headY - (opts.label ? 30 : 8), t));
   if (a.avatar === 10 && !a.react?.until) { // robot agents mumble agent clichés now and then
@@ -751,7 +854,7 @@ function screenToTile(sx, sy) {
 function exhibitHTML(id, big) {
   const e = EXHIBITS[id];
   if (!e) return '';
-  let h = EX_IMG[id] && EX_IMG[id].ok ? `<img class="ex-img" src="/art/ex/${id}.png" alt="">` : `<div class="ex-icon">${e.icon}</div>`;
+  let h = EX_IMG[id] && EX_IMG[id].ok ? `<img class="ex-img" src="/art/ex/${id}.webp" alt="">` : `<div class="ex-icon">${e.icon}</div>`;
   if (e.title) h += `<h2>${esc(e.title)}</h2>`;
   if (e.sub) h += `<p class="sub" dir="ltr">${esc(e.sub)}</p>`;
   const text = isGuide && e.textGuide ? e.textGuide : e.text;
@@ -1070,7 +1173,7 @@ function applySnap(m) {
   for (const row of m.players) upsertPlayer(row);
   if (role === 'visitor') { S.guide.x = S.guide.rx = m.g[0]; S.guide.y = S.guide.ry = m.g[1]; cam.init = false; }
   applyMeta(m.meta);
-  for (const rm of rooms) light[rm.i] = rm.i <= S.discovered ? 1 : 0;
+  for (const rm of rooms) light[rm.i] = rm.i > S.discovered ? 0 : PREV_LIGHT;
   setOnline(m.n);
 }
 function react(i) {
@@ -1235,7 +1338,12 @@ function frame() {
     nextStep = t + STEP_MS;
   }
 
-  // fell into lava: respawn at this room's spawn tile
+  // jumped into the abyss: the lesson appears for everyone shortly after
+  const onPit = tileAt(S.guide.x, S.guide.y) === 'L';
+  if (onPit && !S.guide.pitSeen) { S.guide.pitSeen = true; setTimeout(() => showLesson(EXTRA.abyssLesson), 2200); }
+  if (!onPit) S.guide.pitSeen = false;
+
+  // fell into the abyss: respawn at this room's spawn tile
   if (isGuide && S.guide.fallAt && t - S.guide.fallAt > 1500) {
     const rr = rooms[blockRoomAt(S.guide.x, S.guide.y)] || rooms[0];
     S.guide.fallAt = 0; S.guide.lavaAt = 0;
@@ -1260,7 +1368,7 @@ function frame() {
   // fog of war fade
   const kl = 1 - Math.exp(-dt * 2.5);
   for (const rm of rooms) {
-    const target = rm.i <= S.discovered ? 1 : 0;
+    const target = rm.i > S.discovered ? 0 : rm.i === S.room ? 1 : PREV_LIGHT;
     light[rm.i] += (target - light[rm.i]) * kl;
     if (Math.abs(target - light[rm.i]) < .003) light[rm.i] = target;
   }
