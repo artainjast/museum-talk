@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
-import { MAP_W, MAP_H, rooms, zones, isWalkable, blockRoomAt, tileAt, SECRET_ROOM } from './public/map.js';
+import { MAP_W, MAP_H, rooms, isWalkable, blockRoomAt, tileAt, SECRET_ROOM } from './public/map.js';
 import { UI, EXHIBITS, BOT_NAMES } from './public/content.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -36,7 +36,7 @@ const st = {
   secret: false,     // hidden door (room 4 -> secret abyss hall) open
   secretSeen: false, // guide has walked into the secret hall
   spotlight: null,
-  vote: { idx: -1, endsAt: 0, revealed: false, counts: [0, 0] }, // endsAt: Date.now() ms
+  puzzle: { open: false, endsAt: 0, revealed: false, seq: 0 }, // room 3 "is it really done?" overlay; endsAt: Date.now() ms
 };
 let hostId = null;
 
@@ -45,7 +45,7 @@ const players = new Map();   // id -> player
 const bySession = new Map(); // sessionId -> player
 const dirty = new Set();
 let nextId = 1, visitorNo = 0;
-let guideDirty = false, countsDirty = false, lastOnline = -1;
+let guideDirty = false, lastOnline = -1;
 
 // ------------------------------------------------------------------ pathing
 // pass: open tiles inside rooms the guide has discovered (incl. lava; robots path through it)
@@ -80,12 +80,12 @@ function bfs(start, out, m = walk) {
 
 const field = new Int16Array(N);
 let fieldDirty = true, nearCache = null;
-const zoneFields = new Map(); // target tile -> Int16Array
-function zoneField(i) {
-  let f = zoneFields.get(i);
+const goalFields = new Map(); // tap-to-move target tile -> Int16Array
+function goalField(i) {
+  let f = goalFields.get(i);
   if (!f) {
-    if (zoneFields.size > 300) zoneFields.clear();
-    f = new Int16Array(N); bfs(i, f); zoneFields.set(i, f);
+    if (goalFields.size > 300) goalFields.clear();
+    f = new Int16Array(N); bfs(i, f); goalFields.set(i, f);
   }
   return f;
 }
@@ -141,56 +141,26 @@ function stepPlayer(p, t) {
     }
     return;
   }
-  const voting = p.choice && p.target != null;
-  if (!voting && p.goal >= 0) { // tap-to-move
-    const gf = zoneField(p.goal), gd = gf[i];
+  if (p.goal >= 0) { // tap-to-move
+    const gf = goalField(p.goal), gd = gf[i];
     if (gd <= 0) { p.goal = -1; p.manualUntil = t + MANUAL_MS; return; }
     const c = neighbours(i).filter(n => gf[n] === gd - 1);
     if (c.length) { const n = c[(Math.random() * c.length) | 0]; p.x = n % MAP_W; p.y = (n / MAP_W) | 0; dirty.add(p); }
     return;
   }
-  if (!voting && t < p.manualUntil) return; // moved by themselves recently: stay put
-  const f = voting ? zoneField(p.target) : field;
+  if (t < p.manualUntil) return; // moved by themselves recently: stay put
+  const f = field;
   const d = f[i];
-  if (d < 0 || (!voting && d > 60)) { if (!voting) placeNear(p); return; } // stuck or far behind: rejoin the group
-  const stopAt = voting ? 0 : p.space;
+  if (d < 0 || d > 60) { placeNear(p); return; } // stuck or far behind: rejoin the group
   let next = -1;
-  if (d > stopAt) {
+  if (d > p.space) {
     const c = neighbours(i).filter(n => f[n] === d - 1 && f[n] >= 0);
     if (c.length) next = c[(Math.random() * c.length) | 0];
-  } else if (!voting && Math.random() < 0.04) {
+  } else if (Math.random() < 0.04) {
     const c = neighbours(i).filter(n => f[n] >= 2 && f[n] <= p.space + 1);
     if (c.length) next = c[(Math.random() * c.length) | 0];
   }
   if (next >= 0) { p.x = next % MAP_W; p.y = (next / MAP_W) | 0; dirty.add(p); }
-}
-
-// ------------------------------------------------------------------ voting
-const zoneUse = new Map();
-function voteIsOpen(t = Date.now()) { return st.vote.idx >= 0 && !st.vote.revealed && t < st.vote.endsAt; }
-function releaseTarget(p) {
-  if (p.target != null) zoneUse.set(p.target, Math.max(0, (zoneUse.get(p.target) || 1) - 1));
-  p.target = null;
-}
-function pickTarget(k) {
-  let best = [], bu = Infinity;
-  for (const z of zones[k]) {
-    const i = z.y * MAP_W + z.x, u = zoneUse.get(i) || 0;
-    if (u < bu) { bu = u; best = [i]; } else if (u === bu) best.push(i);
-  }
-  const i = best[(Math.random() * best.length) | 0];
-  zoneUse.set(i, (zoneUse.get(i) || 0) + 1);
-  return i;
-}
-function recount() {
-  if (st.vote.idx < 0 || st.vote.revealed) return; // keep final counts after reveal
-  let h = 0, a = 0;
-  for (const p of players.values()) { if (p.choice === 'h') h++; else if (p.choice === 'a') a++; }
-  if (h !== st.vote.counts[0] || a !== st.vote.counts[1]) { st.vote.counts = [h, a]; countsDirty = true; }
-}
-function clearChoices() {
-  for (const p of players.values()) { p.choice = null; p.target = null; }
-  zoneUse.clear();
 }
 
 // ------------------------------------------------------------------ messages
@@ -200,7 +170,7 @@ const metaMsg = () => ({
   secret: st.secret,
   secretSeen: st.secretSeen,
   spotlight: st.spotlight,
-  vote: { idx: st.vote.idx, remaining: Math.max(0, st.vote.endsAt - Date.now()), revealed: st.vote.revealed, counts: st.vote.counts },
+  puzzle: { open: st.puzzle.open, remaining: Math.max(0, st.puzzle.endsAt - Date.now()), revealed: st.puzzle.revealed, seq: st.puzzle.seq },
 });
 const playerRow = p => [p.id, p.x, p.y, p.avatar, p.name];
 const onlineCount = () => { let n = 0; for (const p of players.values()) if (p.connected && !p.bot) n++; return n; };
@@ -215,23 +185,22 @@ function applyHostState(s) {
   if (Number.isInteger(dv) && dv >= 0 && dv < ROOMS && dv !== st.discovered) { st.discovered = dv; walkChanged = true; }
   if (typeof s.secret === 'boolean' && s.secret !== st.secret) { st.secret = s.secret; walkChanged = true; }
   if (typeof s.secretSeen === 'boolean' && s.secretSeen !== st.secretSeen) { st.secretSeen = s.secretSeen; walkChanged = true; }
-  if (walkChanged) { rebuildWalk(); zoneFields.clear(); fieldDirty = true; meta = true; }
+  if (walkChanged) { rebuildWalk(); goalFields.clear(); fieldDirty = true; meta = true; }
   const x = Number(s.x), y = Number(s.y);
   if (Number.isInteger(x) && Number.isInteger(y) && (x !== st.gx || y !== st.gy) && isWalkable(x, y, st.unlocked, st.secret)) {
     st.gx = x; st.gy = y; fieldDirty = true; guideDirty = true;
   }
   const sp = s.spotlight === null || (typeof s.spotlight === 'string' && EXHIBITS[s.spotlight]) ? s.spotlight : st.spotlight;
   if (sp !== st.spotlight) { st.spotlight = sp; meta = true; }
-  const v = s.vote;
-  if (v && typeof v === 'object' && Number.isInteger(v.idx) && v.idx >= -1 && v.idx < 10) {
-    const remaining = Math.max(0, Math.min(60000, Number(v.remaining) || 0));
-    const revealed = !!v.revealed;
-    if (v.idx !== st.vote.idx) {
-      st.vote = { idx: v.idx, endsAt: Date.now() + remaining, revealed, counts: [0, 0] };
-      clearChoices(); countsDirty = true; meta = true;
-    } else if (revealed !== st.vote.revealed) {
-      st.vote.revealed = revealed;
-      if (revealed) { st.vote.endsAt = Math.min(st.vote.endsAt, Date.now()); for (const p of players.values()) releaseTarget(p); for (const p of players.values()) p.choice = null; zoneUse.clear(); }
+  const pz = s.puzzle;
+  if (pz && typeof pz === 'object') {
+    const open = !!pz.open, revealed = !!pz.revealed, seq = Number.isInteger(pz.seq) ? pz.seq : st.puzzle.seq;
+    if (seq !== st.puzzle.seq) { // V pressed: (re)start the countdown
+      const remaining = Math.max(0, Math.min(120000, Number(pz.remaining) || 0));
+      st.puzzle = { open, endsAt: Date.now() + remaining, revealed, seq };
+      meta = true;
+    } else if (open !== st.puzzle.open || revealed !== st.puzzle.revealed) {
+      st.puzzle.open = open; st.puzzle.revealed = revealed;
       meta = true;
     }
   }
@@ -292,7 +261,7 @@ io.on('connection', socket => {
       if (!name) name = UI.defaultName.replace('{n}', nf.format(++visitorNo));
       p = {
         id: nextId++, sessionId: sid || crypto.randomBytes(8).toString('hex'), socketId: socket.id, connected: true, goneAt: 0,
-        name, avatar, x: st.gx, y: st.gy, space: 2 + ((Math.random() * 4) | 0), nextAt: 0, choice: null, target: null,
+        name, avatar, x: st.gx, y: st.gy, space: 2 + ((Math.random() * 4) | 0), nextAt: 0,
         goal: -1, manualUntil: 0, lastStep: 0, lastGoto: 0,
       };
       placeNear(p);
@@ -334,15 +303,6 @@ io.on('connection', socket => {
     p.manualUntil = t + MANUAL_MS;
   }));
 
-  socket.on('vote', safe((choice) => {
-    const p = players.get(socket.data.pid);
-    if (!p || (choice !== 'h' && choice !== 'a') || !voteIsOpen()) return;
-    if (p.choice === choice) return;
-    releaseTarget(p);
-    p.choice = choice;
-    p.target = pickTarget(choice);
-    recount();
-  }));
 
   socket.on('react', safe((idx) => {
     const p = players.get(socket.data.pid);
@@ -364,7 +324,7 @@ for (let k = 1; k <= BOTS; k++) {
   const p = {
     id: nextId++, sessionId: 'bot-' + k, socketId: null, connected: true, goneAt: 0, bot: true,
     name: BOT_NAMES[k - 1].name, avatar: 10, x: st.gx, y: st.gy, space: 1 + (k % 3), nextAt: 0,
-    choice: null, target: null, goal: -1, manualUntil: 0, lastStep: 0, lastGoto: 0, fallAt: 0,
+    goal: -1, manualUntil: 0, lastStep: 0, lastGoto: 0, fallAt: 0,
   };
   placeNear(p);
   players.set(p.id, p);
@@ -393,17 +353,11 @@ setInterval(safe(() => {
 }), 100);
 
 setInterval(safe(() => {
-  if (countsDirty) { countsDirty = false; io.emit('c', st.vote.counts); }
-}), 500);
-
-setInterval(safe(() => {
   const t = Date.now();
   for (const p of players.values()) {
     if (!p.bot && !p.connected && t - p.goneAt > 60000) {
-      releaseTarget(p);
       players.delete(p.id); bySession.delete(p.sessionId); dirty.delete(p);
       io.emit('pleave', p.id);
-      recount();
     }
   }
 }), 2000);

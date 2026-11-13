@@ -2,7 +2,6 @@
 //
 // Legend:
 //   #  wall (inside a room: low partition)   .  floor        =  door tile (open only if its room is unlocked)
-//   h  vote zone "human"                     a  vote zone "agent"
 //   S  spawn tile of a room                  L  abyss (guide + robot agents can jump in and fall; visitors can't)
 //   props (solid): o pillar, n bench, p plant, k desk, d rubber duck, m samovar, c coffee machine
 //   other digits / letters: exhibit anchors (see EXHIBIT_KEYS; a prop listed there is an easter egg with a plaque)
@@ -52,14 +51,13 @@ const INTERIORS = [
     '.o..................o.',
     E, E,
   ],
-  [ // 3 human or agent?
+  [ // 3 is it really done? (puzzle overlay, opened with V)
     '.........1111.........',
-    E, E, E,
-    '...hhhhhh....aaaaaa...',
-    '...hhhhhh....aaaaaa...',
-    '...hhhhhh....aaaaaa...',
-    '...hhhhhh....aaaaaa...',
-    '...hhhhhh....aaaaaa...',
+    E, E, E, E,
+    '....nn..........nn....',
+    E,
+    '....nn..........nn....',
+    E,
     E,
     '.o..................o.',
     E,
@@ -113,7 +111,7 @@ const EXHIBIT_KEYS = [
   { 1: 'lobby.sign', 2: 'lobby.guide', 3: 'lobby.help', l: 'egg.loading', m: 'egg.samovar' },
   { 1: 'r1.message', 2: 'r1.ticket', 3: 'r1.clock', 4: 'r1.lesson', d: 'egg.duck' },
   { 1: 'r2.wef', 2: 'r2.aristotle', x: 'egg.404' },
-  { 1: 'r3.rules' },
+  { 1: 'r3.report' },
   { 1: 'r4.brief', 2: 'r4.delegate', 3: 'r4.empathy', 4: 'r4.feedback', 5: 'r4.verify', 6: 'r4.influence', 7: 'r4.learning', p: 'egg.plant' },
   { 1: 'r5.board', 2: 'r5.meta', c: 'egg.coffee' },
   { 1: 'r6.t1', 2: 'r6.t2', 3: 'r6.t3', 4: 'r6.t4', q: 'r6.quote', b: 'r6.qa' },
@@ -161,8 +159,7 @@ export const MAP = g.map(r => r.join(''));
 
 const roomIdx = new Int8Array(MAP_W * MAP_H).fill(-1);
 export const exhibits = [];
-export const zones = { h: [], a: [] };
-const SPECIAL = '.#Sha= L';
+const SPECIAL = '.#S= L';
 export const props = []; // { x, y, kind, room }
 
 rooms.forEach((r, i) => {
@@ -171,7 +168,6 @@ rooms.forEach((r, i) => {
     roomIdx[y * MAP_W + x] = i;
     const c = MAP[y][x];
     if (c === 'S') r.spawn = { x, y };
-    else if (c === 'h' || c === 'a') zones[c].push({ x, y });
     else if (!SPECIAL.includes(c)) {
       const id = EXHIBIT_KEYS[i][c];
       if (PROPS.includes(c)) props.push({ x, y, kind: c, room: i });
@@ -185,12 +181,6 @@ rooms.forEach((r, i) => {
   exhibits.push(...Object.values(found));
 });
 
-export const zoneRect = {};
-for (const k of ['h', 'a']) {
-  const xs = zones[k].map(t => t.x), ys = zones[k].map(t => t.y);
-  zoneRect[k] = { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
-}
-
 export const tileAt = (x, y) => (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) ? ' ' : MAP[y][x];
 export const roomAt = (x, y) => (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) ? -1 : roomIdx[y * MAP_W + x];
 export const doorRoomAt = (x, y) => doorIdx.get(y * MAP_W + x) ?? -1;
@@ -198,7 +188,7 @@ export const doorRoomAt = (x, y) => doorIdx.get(y * MAP_W + x) ?? -1;
 // unlocked: main rooms 0..6 open in order; secret: the hidden door to room 7 is open.
 export function isWalkable(x, y, unlocked, secret = false) {
   const c = tileAt(x, y);
-  if (c === '.' || c === 'S' || c === 'h' || c === 'a' || c === 'L') return true;
+  if (c === '.' || c === 'S' || c === 'L') return true;
   if (c !== '=') return false;
   const r = doorRoomAt(x, y);
   return r === SECRET_ROOM ? !!secret : r <= unlocked;

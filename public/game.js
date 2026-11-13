@@ -1,12 +1,12 @@
-import { MAP_W, MAP_H, RW, RH, rooms, doors, exhibits, props, zoneRect, tileAt, roomAt, doorRoomAt, blockRoomAt, isWalkable, exDist, SECRET_ROOM } from './map.js';
-import { UI, EXTRA, AVATARS, AVATAR_SPRITES, REACTIONS, ROOM_TITLES, EXHIBITS, SCENARIOS, VOTE_FINAL, HELP_KEYS, BOT_LINES, BOT_NAMES } from './content.js';
+import { MAP_W, MAP_H, RW, RH, rooms, doors, exhibits, props, tileAt, roomAt, doorRoomAt, blockRoomAt, isWalkable, exDist, SECRET_ROOM } from './map.js';
+import { UI, EXTRA, AVATARS, AVATAR_SPRITES, REACTIONS, ROOM_TITLES, EXHIBITS, PUZZLE, HELP_KEYS, BOT_LINES, BOT_NAMES } from './content.js';
 
 // ---------------------------------------------------------------- utils
 const T = 32;               // world px per tile
 const STEP_MS = 120;        // guide step repeat
-const TW = 64, TH = 32, WALL_TALL = 62, WALL_SHORT = 12; // isometric tile + wall heights (world px)
+const TW = 64, TH = 32, WALL_TALL = 104, WALL_SHORT = 12; // isometric tile + wall heights (world px)
 const isoPt = (x, y) => [(x - y) * TW / 2, (x + y) * TH / 2];
-const VOTE_MS = 20000;
+const PUZZLE_MS = PUZZLE.seconds * 1000;
 const nf = new Intl.NumberFormat('fa-IR');
 const fa = n => nf.format(n);
 const fmt = (s, o) => s.replace(/\{(\w+)\}/g, (_, k) => o[k]);
@@ -34,7 +34,7 @@ const S = {
   discovered: 0, // highest main room the guide has walked into (fog of war)
   secret: false, secretSeen: false, // hidden door in room 4 open / guide has been inside the secret hall
   spotlight: null,
-  vote: { idx: -1, endsAt: 0, revealed: false, counts: [0, 0] }, // endsAt in performance.now() ms
+  puzzle: { open: false, endsAt: 0, revealed: false, seq: 0 }, // room 3 overlay; endsAt in performance.now() ms
   players: new Map(),  // visitor avatars (phase B)
   me: null,
   room: -1,
@@ -116,11 +116,6 @@ function addWorldText(room, x, y, w, h, cls, html, id) {
 {
   const r0 = rooms[0], r6 = rooms[6], sign = EXHIBITS['lobby.sign'];
   addWorldText(0, r0.x0 + 3, r0.y0 + 2, 16, 3, 'wt-title', `${esc(sign.title)}<small dir="ltr">${esc(sign.sub)}</small>`);
-  for (const k of ['h', 'a']) {
-    const z = zoneRect[k];
-    const [emoji, ...rest] = (k === 'h' ? UI.voteHuman : UI.voteAgent).split(' ');
-    addWorldText(3, z.x0, z.y0, z.x1 - z.x0 + 1, z.y1 - z.y0 + 1, 'wt-zone', `<b>${emoji}</b><span>${esc(rest.join(' '))}</span><span class="zc"></span>`, 'zone-' + k);
-  }
   addWorldText(6, r6.x0 + 1, r6.y0 + 3, 20, 3, 'wt-quote', esc(EXHIBITS['r6.quote'].text));
   addWorldText(6, r6.x0 + 3, r6.y0 + 7, 16, 2, 'wt-qa', esc(EXHIBITS['r6.qa'].text));
 }
@@ -174,22 +169,12 @@ function drawGround(nearId) {
       c.strokeStyle = 'rgba(120,105,90,.16)'; c.lineWidth = 1; c.beginPath();
       c.moveTo(px, py + (h >> 3) % T); c.quadraticCurveTo(px + T / 2, py + (h >> 9) % T, px + T, py + (h >> 15) % T); c.stroke();
     }
-    if (t === 'h') { c.fillStyle = 'rgba(255,138,61,.28)'; c.fillRect(px, py, T + .5, T + .5); }
-    else if (t === 'a') { c.fillStyle = 'rgba(34,184,200,.28)'; c.fillRect(px, py, T + .5, T + .5); }
-    else if (t === '=') { c.fillStyle = 'rgba(110,80,50,.16)'; c.fillRect(px, py, T + .5, T + .5); }
+    if (t === '=') { c.fillStyle = 'rgba(110,80,50,.16)'; c.fillRect(px, py, T + .5, T + .5); }
     else if (FLAT_PROP[t]) {
       c.font = `${T * .7}px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
       c.fillText(FLAT_PROP[t], px + T / 2, py + T / 2);
     }
   }
-  // vote zone borders
-  c.setLineDash([6, 5]); c.lineWidth = 2;
-  for (const k of ['h', 'a']) {
-    const z = zoneRect[k];
-    c.strokeStyle = k === 'h' ? 'rgba(220,100,30,.7)' : 'rgba(20,140,160,.7)';
-    c.strokeRect(z.x0 * T + 2, z.y0 * T + 2, (z.x1 - z.x0 + 1) * T - 4, (z.y1 - z.y0 + 1) * T - 4);
-  }
-  c.setLineDash([]);
   // exhibits
   for (const e of exhibits) {
     if (e.x1 < v.x0 || e.x0 > v.x1 || e.y1 < v.y0 - 1 || e.y0 > v.y1) continue;
@@ -562,27 +547,25 @@ function isoGround(now) {
     diamond(c, x, y);
     c.fillStyle = col; c.strokeStyle = col; c.fill(); c.stroke();
     if ((x + y) & 1) { c.fillStyle = 'rgba(0,0,0,.04)'; c.fill(); }
-    if (t === 'h') { c.fillStyle = 'rgba(255,138,61,.3)'; c.fill(); }
-    else if (t === 'a') { c.fillStyle = 'rgba(34,184,200,.3)'; c.fill(); }
-    else if (t === '=') { c.fillStyle = 'rgba(110,80,50,.18)'; c.fill(); }
+    if (t === '=') { c.fillStyle = 'rgba(110,80,50,.18)'; c.fill(); }
     const lt = light[blockRoomAt(x, y)] ?? 1;
     if (lt < .995) { c.fillStyle = c.strokeStyle = `rgba(11,10,16,${(1 - lt) * FOG_MAX})`; c.fill(); c.stroke(); }
     const na = nightAlpha(x, y);
     if (na > .01) { c.fillStyle = c.strokeStyle = `rgba(6,10,35,${na})`; c.fill(); c.stroke(); }
   }
-  // vote zone borders
-  c.setLineDash([8, 6]); c.lineWidth = 2;
-  for (const k of ['h', 'a']) {
-    const z = zoneRect[k];
-    quad(c, [isoPt(z.x0, z.y0), isoPt(z.x1 + 1, z.y0), isoPt(z.x1 + 1, z.y1 + 1), isoPt(z.x0, z.y1 + 1)]);
-    c.strokeStyle = k === 'h' ? 'rgba(220,100,30,.75)' : 'rgba(20,140,160,.75)'; c.stroke();
-  }
-  c.setLineDash([]);
   drawLampPools(c, now);
 }
 
 // Upright panel standing on the line (xa,ya)->(xb,yb) in tile space, from height z0 to z1 (world px).
 function drawPanel(c, xa, ya, xb, yb, z0, z1, id, glow, legs) {
+  if (EX_IMG[id] && EX_IMG[id].ok) { // shrink wide spans to a picture-shaped frame, centred
+    const [pax, pay] = isoPt(xa, ya), [pbx, pby] = isoPt(xb, yb);
+    const L = Math.hypot(pbx - pax, pby - pay), want = (z1 - z0) * 1.12;
+    if (L > want) {
+      const k = want / L / 2, mx = (xa + xb) / 2, my = (ya + yb) / 2, dx = xb - xa, dy = yb - ya;
+      xa = mx - dx * k; xb = mx + dx * k; ya = my - dy * k; yb = my + dy * k;
+    }
+  }
   const [ax, ay] = isoPt(xa, ya), [bx, by] = isoPt(xb, yb);
   const P = (u, z) => [ax + (bx - ax) * u, ay + (by - ay) * u - z];
   if (legs) {
@@ -658,7 +641,7 @@ function drawWall(c, x, y, h, fog, frames, nearId) {
     // each wall tile paints only its own slice of the frame, so neighbouring wall tiles never cover it
     c.save();
     quad(c, [[wx, wy], [sx, sy], [sx, sy - h - 6], [wx, wy - h - 6]]); c.clip();
-    for (const e of frames) drawPanel(c, e.x0 + .08, y + 1, e.x1 + .92, y + 1, h * .22, h * .92, e.id, e.id === nearId, false);
+    for (const e of frames) drawPanel(c, e.x0 + .08, y + 1, e.x1 + .92, y + 1, h * .14, h * .95, e.id, e.id === nearId, false);
     if (fog > .005) { quad(c, [[wx, wy], [sx, sy], [sx, sy - h], [wx, wy - h]]); c.fillStyle = `rgba(11,10,16,${fog})`; c.fill(); }
     c.restore();
   }
@@ -769,7 +752,7 @@ function isoScene(t, focusRoom) {
     if (e.prop || e.y0 === rooms[e.room].y0) continue; // props draw themselves; wall-mounted frames draw with their wall
     if (!isoTileOnScreen(e.x0, e.y0, 120)) continue;
     const yy = e.y0 + .55;
-    items.push({ d: (e.x0 + e.x1 + 1) / 2 + yy + .4, k: 1, draw: () => drawPanel(c, e.x0 + .05, yy, e.x1 + .95, yy, 10, 52, e.id, e.id === nearId, true) });
+    items.push({ d: (e.x0 + e.x1 + 1) / 2 + yy + .4, k: 1, draw: () => drawPanel(c, e.x0 + .05, yy, e.x1 + .95, yy, 10, 80, e.id, e.id === nearId, true) });
   }
   for (const d of doors) {
     if (d.room <= S.unlocked || d.room === SECRET_ROOM) continue;
@@ -973,44 +956,47 @@ function closeOverlay(which) {
   }
 }
 
-let lastVoteKey = '';
-function renderVote(t) {
-  const v = S.vote, p = $('vote');
-  const show = v.idx >= 0 && S.room === 3;
-  p.hidden = !show;
-  const open = show && voteOpen(t);
-  document.body.classList.toggle('voting', open);
-  if (role === 'visitor') {
-    const vb = $('voteBtns');
-    vb.hidden = !(open && joined);
-    for (const b of vb.children) b.classList.toggle('on', b.dataset.v === myVote);
-  }
-  if (!show) { lastVoteKey = ''; return; }
-  const left = Math.max(0, Math.ceil((v.endsAt - t) / 1000));
-  const key = `${v.idx}|${left}|${v.revealed}|${v.counts}`;
-  if (key === lastVoteKey) return;
-  lastVoteKey = key;
-  const sc = SCENARIOS[v.idx];
-  let h = `<div class="vp-head"><span>${fmt(EXTRA.scenario, { n: fa(v.idx + 1), total: fa(SCENARIOS.length) })}</span>` +
-    `<span class="vp-timer${left === 0 ? ' done' : ''}">${left === 0 ? EXTRA.voteClosed : '⏱ ' + fa(left)}</span></div>` +
-    `<p class="vp-text">${esc(sc.text)}</p>`;
-  if (role !== 'solo') {
-    const [hc, ac] = v.counts;
-    h += `<div class="vp-counts"><span class="h" style="flex-grow:${hc + .5}">${UI.voteHuman} ${fa(hc)}</span><span class="a" style="flex-grow:${ac + .5}">${UI.voteAgent} ${fa(ac)}</span></div>`;
-  }
-  if (v.revealed) {
-    h += `<p class="vp-reveal">${esc(sc.reveal)}</p>`;
-    if (v.idx >= 3) h += `<p class="vp-final">${esc(VOTE_FINAL)}</p>`;
-  }
-  p.innerHTML = h;
+// ---------------------------------------------------------------- room 3 puzzle: "is it really done?"
+const PAIR = { 1: '۱', 2: '۲' };
+function pzMarkup(line) { // `code` -> LTR monospace; [[n:...]] -> contradiction highlight n
+  return esc(line)
+    .replace(/`([^`]+)`/g, '<bdi dir="ltr" class="code">$1</bdi>')
+    .replace(/\[\[(\d):(.+?)\]\]/g, (_, n, inner) => `<mark class="ct" data-n="${PAIR[n] || n}">${inner}</mark>`);
 }
-const voteOpen = t => S.vote.idx >= 0 && !S.vote.revealed && S.vote.endsAt > t;
+function setupPuzzle() {
+  const el = $('puzzle');
+  el.querySelector('.pz-intro').textContent = PUZZLE.intro;
+  el.querySelector('.pz-body').innerHTML = PUZZLE.report.map((l, i) => {
+    const cls = i === 0 ? 'pz-done' : l.startsWith('`') || l.startsWith('[[2:`') ? 'pz-file' : l.startsWith('-') ? 'pz-item' : 'pz-line';
+    return `<div class="${cls}">${pzMarkup(l)}</div>`;
+  }).join('');
+  el.querySelector('.pz-answers').innerHTML = PUZZLE.answers.map(a => `<p>${pzMarkup(a)}</p>`).join('') +
+    `<p class="pz-moral"><b>${esc(PUZZLE.moral)}</b></p>`;
+}
+setupPuzzle();
+let pzKey = '';
+function renderPuzzle(t) {
+  const pz = S.puzzle, el = $('puzzle');
+  el.hidden = !pz.open;
+  document.body.classList.toggle('puzzle', pz.open);
+  if (!pz.open) { pzKey = ''; return; }
+  const left = Math.max(0, Math.ceil((pz.endsAt - t) / 1000));
+  const key = `${left}|${pz.revealed}`;
+  if (key === pzKey) return;
+  pzKey = key;
+  const timer = el.querySelector('.pz-timer');
+  timer.textContent = left > 0 ? '⏱ ' + fa(left) : PUZZLE.timeUp;
+  timer.classList.toggle('done', left === 0);
+  timer.hidden = pz.revealed;
+  el.classList.toggle('revealed', pz.revealed);
+  el.querySelector('.pz-answers').hidden = !pz.revealed;
+}
 
 // ---------------------------------------------------------------- guide actions
 let sock = null;
 const hostState = () => ({
   x: S.guide.x, y: S.guide.y, unlocked: S.unlocked, discovered: S.discovered, secret: S.secret, secretSeen: S.secretSeen, spotlight: S.spotlight,
-  vote: { idx: S.vote.idx, remaining: Math.max(0, Math.round(S.vote.endsAt - now())), revealed: S.vote.revealed },
+  puzzle: { open: S.puzzle.open, remaining: Math.max(0, Math.round(S.puzzle.endsAt - now())), revealed: S.puzzle.revealed, seq: S.puzzle.seq },
 });
 function hostSend() {
   if (role === 'host' && sock && sock.connected) sock.emit('host:state', hostState());
@@ -1055,13 +1041,12 @@ function setSpotlight(id) {
   renderSpot();
   hostSend('spotlight');
 }
-function setVote(v) {
-  S.vote = { ...S.vote, ...v };
-  if (v.idx !== undefined && v.revealed === false) S.vote.counts = [0, 0];
-  hostSend('vote');
+function setPuzzle(v) {
+  S.puzzle = { ...S.puzzle, ...v };
+  hostSend('puzzle');
 }
 function resetAll() {
-  setVote({ idx: -1, endsAt: 0, revealed: false });
+  setPuzzle({ open: false, revealed: false });
   setSpotlight(null);
   S.unlocked = 0;
   S.discovered = 0;
@@ -1125,13 +1110,13 @@ addEventListener('keydown', ev => {
         if (cardId) closeCard();
         else if (!$('help').hidden) toggleHelp(false);
         else if (S.spotlight) setSpotlight(null);
+        else if (S.puzzle.open) setPuzzle({ open: false });
         break;
-      case 'KeyV':
-        if (ev.shiftKey) setVote({ idx: -1, endsAt: 0, revealed: false });
-        else if (S.room === 3 && S.vote.idx < SCENARIOS.length - 1) setVote({ idx: S.vote.idx + 1, endsAt: t + VOTE_MS, revealed: false });
+      case 'KeyV': // open the puzzle for everyone (restarts the countdown)
+        setPuzzle({ open: true, endsAt: t + PUZZLE_MS, revealed: false, seq: S.puzzle.seq + 1 });
         break;
       case 'KeyR':
-        if (S.vote.idx >= 0 && !S.vote.revealed) setVote({ revealed: true, endsAt: Math.min(S.vote.endsAt, t) });
+        if (S.puzzle.open && !S.puzzle.revealed) setPuzzle({ revealed: true });
         break;
       case 'KeyK': toggleHelp(); break;
       case 'KeyO': setSecret(!S.secret); break;
@@ -1159,7 +1144,7 @@ addEventListener('keydown', ev => {
 });
 
 // ---------------------------------------------------------------- networking (phase B)
-let joined = false, myVote = null, lastReactAt = 0, metaSeen = false;
+let joined = false, lastReactAt = 0, metaSeen = false;
 let manualUntil = 0, tapMark = null;
 const MANUAL_MS = 8000; // must match server: after this idle time the avatar follows the guide again
 function visitorStep(dx, dy) {
@@ -1194,10 +1179,8 @@ function applyMeta(m) {
     S.secret = !!m.secret; S.secretSeen = !!m.secretSeen;
     S.discovered = m.discovered ?? S.discovered;
     if (m.spotlight !== S.spotlight) { S.spotlight = m.spotlight; spotDismissed = null; renderSpot(); }
-    if (m.vote.idx !== S.vote.idx) myVote = null;
-    S.vote = { idx: m.vote.idx, endsAt: now() + m.vote.remaining, revealed: m.vote.revealed, counts: m.vote.counts };
-  } else if (m.vote.idx === S.vote.idx) {
-    S.vote.counts = m.vote.counts;
+    const pz = m.puzzle;
+    if (pz) S.puzzle = { open: !!pz.open, endsAt: now() + pz.remaining, revealed: !!pz.revealed, seq: pz.seq };
   }
 }
 function applySnap(m) {
@@ -1213,12 +1196,6 @@ function react(i) {
   if (!sock || t - lastReactAt < 1000) return;
   lastReactAt = t;
   sock.emit('react', i);
-}
-function castVote(v) {
-  if (!sock || !voteOpen(now())) return;
-  myVote = v;
-  sock.emit('vote', v);
-  lastVoteKey = '';
 }
 const newSessionId = () => 's' + Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
 
@@ -1315,10 +1292,6 @@ function setupBar() {
     b.addEventListener('click', () => react(i));
     $('reacts').appendChild(b);
   });
-  const [bh, ba] = $('voteBtns').children;
-  bh.textContent = UI.voteHuman; ba.textContent = UI.voteAgent;
-  bh.addEventListener('click', () => castVote('h'));
-  ba.addEventListener('click', () => castVote('a'));
 }
 
 if (role !== 'solo') {
@@ -1345,7 +1318,6 @@ if (role !== 'solo') {
   });
   sock.on('snap', applySnap);
   sock.on('meta', applyMeta);
-  sock.on('c', counts => { S.vote.counts = counts; });
   sock.on('pjoin', upsertPlayer);
   sock.on('j', id => {
     if (id === 0) { if (role === 'visitor') S.guide.jumpAt = now(); return; }
@@ -1450,7 +1422,7 @@ function frame() {
   if (zoomOut && S.room >= 0 && focus === S.guide) {
     if (ISO) [tx, ty] = isoPt(rooms[S.room].cx, rooms[S.room].cy), ty -= 30;
     else { tx = rooms[S.room].cx * T; ty = rooms[S.room].cy * T; }
-  } else if (ISO) { [tx, ty] = isoPt(focus.rx + .5, focus.ry + .5); ty -= 30; }
+  } else if (ISO) { [tx, ty] = isoPt(focus.rx + .5, focus.ry + .5); ty -= 44; }
   else { tx = (focus.rx + .5) * T; ty = (focus.ry + .5) * T; }
   if (!cam.init) { cam.x = tx; cam.y = ty; cam.init = true; }
   const kc = 1 - Math.exp(-dt * 7);
@@ -1458,7 +1430,7 @@ function frame() {
   world.style.transform = `translate(${vw / 2 - cam.x * zoom}px, ${vh / 2 - cam.y * zoom}px) scale(${zoom})`;
 
   updatePlaque(t);
-  renderVote(t);
+  renderPuzzle(t);
   if (ISO) {
     isoDt = dt;
     isoGround(t);
