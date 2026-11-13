@@ -1,4 +1,4 @@
-import { MAP_W, MAP_H, RW, RH, rooms, doors, exhibits, props, tileAt, roomAt, doorRoomAt, blockRoomAt, isWalkable, exDist, SECRET_ROOM } from './map.js';
+import { MAP_W, MAP_H, rooms, areas, doors, exhibits, props, ducks, tileAt, roomAt, doorRoomAt, passageAt, areaAt, blockRoomAt, isWalkable, exDist, SECRET_ROOM } from './map.js';
 import { UI, EXTRA, AVATARS, AVATAR_SPRITES, REACTIONS, ROOM_TITLES, EXHIBITS, PUZZLE, HELP_KEYS, BOT_LINES, BOT_NAMES } from './content.js';
 
 // ---------------------------------------------------------------- utils
@@ -80,9 +80,10 @@ const cam = { x: 0, y: 0, init: false };
 
 function computeZoom() {
   if (ISO) {
-    if (zoomOut) zoom = Math.min(vw / ((RW + RH) * TW / 2 + 60), vh / ((RW + RH) * TH / 2 + 140));
+    const zr = rooms[Math.max(0, S.room)];
+    if (zoomOut) zoom = Math.min(vw / ((zr.w + zr.h) * TW / 2 + 60), vh / ((zr.w + zr.h) * TH / 2 + 160));
     else zoom = Math.min(Math.max(vw, vh) / 1000, Math.min(vw, vh) / 440);
-  } else if (zoomOut) zoom = Math.min(vw / ((RW + 1) * T), vh / ((RH + 1) * T));
+  } else if (zoomOut) zoom = Math.min(vw / ((rooms[Math.max(0, S.room)].w + 1) * T), vh / ((rooms[Math.max(0, S.room)].h + 1) * T));
   else zoom = Math.min(Math.max(vw, vh) / (20 * T), Math.min(vw, vh) / (9 * T));
 }
 function resize() {
@@ -116,18 +117,27 @@ function addWorldText(room, x, y, w, h, cls, html, id) {
 {
   const r0 = rooms[0], r6 = rooms[6], sign = EXHIBITS['lobby.sign'];
   addWorldText(0, r0.x0 + 3, r0.y0 + 2, 16, 3, 'wt-title', `${esc(sign.title)}<small dir="ltr">${esc(sign.sub)}</small>`);
-  addWorldText(6, r6.x0 + 1, r6.y0 + 3, 20, 3, 'wt-quote', esc(EXHIBITS['r6.quote'].text));
-  addWorldText(6, r6.x0 + 3, r6.y0 + 7, 16, 2, 'wt-qa', esc(EXHIBITS['r6.qa'].text));
+  addWorldText(6, r6.x0 + 1, r6.y0 + 3, 18, 3, 'wt-quote', esc(EXHIBITS['r6.quote'].text));
+  const r7 = rooms[7];
+  addWorldText(7, r7.x0 + 4, r7.y0 + 12, 18, 2, 'wt-qa', esc(EXHIBITS['r7.qa'].text));
 }
 
 // ---------------------------------------------------------------- drawing
 const FLOOR = ['#efe8dc', '#e8e3ef', '#e3ebe4', '#f1e6e1', '#efe9d6', '#e3eaf0', '#ece5f0', '#d8d0c4'];
 const hash = (x, y) => (((x * 73856093) ^ (y * 19349663)) >>> 0);
 
+const FLOOR_TINT = { ',': '#b5434a', ':': '#bf9465', ';': '#86c070' }; // carpet, wood, grass
 function floorColor(x, y) {
-  const r = roomAt(x, y);
-  return FLOOR[r >= 0 ? r : Math.max(0, doorRoomAt(x, y))];
+  let t = tileAt(x, y);
+  if (t !== '.' && t !== 'S' && t !== '=' && !FLOOR_TINT[t]) { const a = areaAt(x, y); if (a >= 0) t = areas[a].floor; }
+  if (FLOOR_TINT[t]) return FLOOR_TINT[t];
+  const r = roomAt(x, y), dr = doorRoomAt(x, y);
+  return FLOOR[r >= 0 ? r : dr >= 0 ? dr : Math.max(0, blockRoomAt(x, y))];
 }
+// Secret passages look like wall until this viewer walks through one.
+const foundPass = new Set(store.get('museum.passages') || []);
+const passageOpen = (x, y) => foundPass.has(passageAt(x, y));
+const looksLikeWall = (x, y) => { const c = tileAt(x, y); return c === '#' || isHiddenDoor(x, y) || (c === 'f' && !passageOpen(x, y)); };
 
 function setWorldTransform(ctx, canvas) {
   const s = zoom * dpr;
@@ -144,6 +154,8 @@ function visibleRange() {
 
 // Clickable exhibits: polygons (world px) recorded while drawing, so a tap opens what you see.
 const hitAreas = new Map(); // exhibit id -> [[x, y], ...]
+const seatHits = new Map(); // tile index -> polygon (Q&A benches & sofas)
+const QA_ROOM = 7;
 function inPoly(px, py, poly) {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -161,14 +173,14 @@ const exById = new Map(exhibits.map(e => [e.id, e]));
 const eggPropId = new Map(exhibits.filter(e => e.prop).map(e => [e.y0 * MAP_W + e.x0, e.id]));
 
 function drawGround(nearId) {
-  hitAreas.clear();
+  hitAreas.clear(); seatHits.clear();
   const c = gctx;
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, ground.width, ground.height);
   setWorldTransform(c, ground);
   const v = visibleRange();
   for (let y = v.y0; y <= v.y1; y++) for (let x = v.x0; x <= v.x1; x++) {
-    const t = isHiddenDoor(x, y) ? '#' : tileAt(x, y);
+    const t = looksLikeWall(x, y) ? '#' : tileAt(x, y);
     if (t === ' ') continue;
     const px = x * T, py = y * T;
     if (t === 'L') { c.fillStyle = `hsl(${18 + 10 * Math.sin(performance.now() / 600 + x + y)}, 100%, 52%)`; c.fillRect(px, py, T + .5, T + .5); continue; }
@@ -203,17 +215,16 @@ function drawGround(nearId) {
   }
   // velvet ropes on locked doors
   // fog of war over rooms the guide hasn't discovered yet
-  for (const r of rooms) {
-    if (light[r.i] > .995) continue;
-    c.fillStyle = `rgba(11,10,16,${(1 - light[r.i]) * FOG_MAX})`;
-    c.fillRect(r.ox * T, r.oy * T, RW * T + .5, RH * T + .5);
+  for (const a of areas) {
+    if (light[a.room] > .995) continue;
+    c.fillStyle = `rgba(11,10,16,${(1 - light[a.room]) * FOG_MAX})`;
+    c.fillRect(a.ox * T, a.oy * T, a.w * T + .5, a.h * T + .5);
   }
-  for (const d of doors) if (d.room > S.unlocked && d.room !== SECRET_ROOM) drawRope(c, d);
+  for (const d of doors) if (!d.open && d.room > S.unlocked && d.room !== SECRET_ROOM) drawRope(c, d);
 }
 
 function drawFrame(c, e, glow) {
-  const r = rooms[e.room];
-  const onWall = e.y0 === r.y0;
+  const onWall = e.wall;
   const left = e.x0 * T + 3, right = (e.x1 + 1) * T - 3;
   const top = onWall ? e.y0 * T - T * .5 : e.y0 * T + 1;
   const bot = onWall ? (e.y1 + 1) * T - 4 : (e.y1 + 1) * T - 8;
@@ -356,7 +367,7 @@ function drawActors(t) {
 }
 
 // ---------------------------------------------------------------- isometric renderer (default; /?flat=1 = top-down)
-const lowered = rooms.map(() => 0);        // per room block: 1 = back walls lowered (block is in front of the focus room)
+const lowered = areas.map(() => 0);        // per room block: 1 = back walls lowered (block is in front of the focus room)
 const EX_IMG = {};                          // exhibit pictures: /art/ex/<id>.webp (emoji fallback if missing)
 for (const e of exhibits) EX_IMG[e.id] = loadImg(`/art/ex/${e.id}.webp`);
 
@@ -373,7 +384,7 @@ function quad(c, pts) { c.beginPath(); c.moveTo(pts[0][0], pts[0][1]); for (let 
 
 // The secret room's door looks like plain wall until it is unlocked (Konami code or N from room 6).
 const isHiddenDoor = (x, y) => tileAt(x, y) === '=' && doorRoomAt(x, y) === SECRET_ROOM && !S.secret;
-const FLAT_PROP = { o: '⚪', n: '🪑', p: '🪴', k: '💻', d: '🦆', m: '🫖', c: '☕' };
+const FLAT_PROP = { o: '⚪', n: '🪑', p: '🪴', k: '💻', d: '🦆', m: '🫖', c: '☕', r: '🗄️', R: '🖥️', z: '🔴', j: '💡', e: '⛲', T: '🏆', U: '🥇', V: '🎖️', v: '🥤', y: '🧯', i: '🐠', g: '🪞', D: '🏺', K: '📚', M: '🎤', s: '🛋️' };
 const LAVA_DEPTH = 14;   // how far below the floor a falling actor is clipped
 const ABYSS_DEPTH = 90;  // visible cliff height of the abyss walls
 
@@ -412,23 +423,78 @@ const eggProps = new Set(exhibits.filter(e => e.prop).map(e => e.y0 * MAP_W + e.
 function drawProp(c, p, t) {
   const { x, y } = p;
   switch (p.kind) {
-    case 'o': // marble pillar
+    case 'pillar':
       vbox(c, x, y, .14, .14, .86, .86, 0, 7, '#e6dfcf'); vbox(c, x, y, .27, .27, .73, .73, 7, 56, '#f1ebdf'); vbox(c, x, y, .14, .14, .86, .86, 56, 64, '#e6dfcf'); break;
-    case 'n': // bench
+    case 'bench':
       vbox(c, x, y, .1, .3, .2, .7, 0, 9, '#5b3a1c'); vbox(c, x, y, .8, .3, .9, .7, 0, 9, '#5b3a1c'); vbox(c, x, y, .04, .27, .96, .73, 9, 14, '#a06a36'); break;
-    case 'p': // potted plant
+    case 'plant':
       vbox(c, x, y, .3, .3, .7, .7, 0, 15, '#c0643b'); vbox(c, x, y, .2, .2, .8, .8, 15, 30, '#3f9a4a'); vbox(c, x, y, .32, .32, .68, .68, 30, 42, '#5cc06a'); vbox(c, x, y, .42, .42, .58, .58, 42, 48, '#7ad487'); break;
-    case 'k': // desk with a laptop
+    case 'desk':
       vbox(c, x, y, .08, .08, .18, .18, 0, 17, '#5b3a1c'); vbox(c, x, y, .82, .82, .92, .92, 0, 17, '#5b3a1c');
       vbox(c, x, y, .02, .02, .98, .98, 17, 21, '#a8763f'); vbox(c, x, y, .28, .4, .72, .7, 21, 23, '#2b2b33'); vbox(c, x, y, .28, .32, .72, .38, 23, 36, '#4fa3ff'); break;
-    case 'd': { // rubber duck
+    case 'duck': {
       const b = Math.abs(Math.sin(t / 380)) * 2;
       vbox(c, x, y, .3, .34, .7, .66, b, b + 10, '#ffd23f'); vbox(c, x, y, .36, .36, .58, .56, b + 10, b + 19, '#ffd23f'); vbox(c, x, y, .58, .42, .7, .5, b + 13, b + 16, '#ff8c1a'); break;
     }
-    case 'm': // samovar with a teapot
+    case 'samovar':
       vbox(c, x, y, .24, .24, .76, .76, 0, 6, '#7a5526'); vbox(c, x, y, .28, .28, .72, .72, 6, 30, '#d9b45a'); vbox(c, x, y, .36, .36, .64, .64, 30, 35, '#b8933f'); vbox(c, x, y, .38, .38, .62, .62, 35, 44, '#2f6fb0'); steam(c, x, y, 50, t); break;
-    case 'c': // coffee machine
+    case 'coffee':
       vbox(c, x, y, .2, .22, .8, .78, 0, 34, '#3a3a44'); vbox(c, x, y, .24, .26, .76, .74, 34, 37, '#5a5a66'); vbox(c, x, y, .42, .66, .58, .8, 6, 13, '#f4f1ea'); steam(c, x, y + .2, 20, t); break;
+    case 'rack': { // server rack with blinking LEDs
+      vbox(c, x, y, .12, .12, .88, .88, 0, 70, '#25262e');
+      const [sx, sy] = isoPt(x + .5, y + .88);
+      for (let i = 0; i < 6; i++) {
+        const on = (Math.floor(t / (180 + i * 37) + x * 3 + i) % 3) !== 0;
+        c.fillStyle = on ? (i % 3 === 0 ? '#ff5d5d' : '#4dff88') : '#1a3a24';
+        c.fillRect(sx - 14 + (i % 2) * 8, sy - 60 + i * 9, 4, 3);
+      }
+      break;
+    }
+    case 'button': // the big red Friday-deploy button on a pedestal
+      vbox(c, x, y, .3, .3, .7, .7, 0, 24, '#5a5a66'); vbox(c, x, y, .36, .36, .64, .64, 24, 30, '#e02424');
+      if (Math.floor(t / 500) % 2) { const [sx, sy] = isoPt(x + .5, y + .5); c.fillStyle = 'rgba(255,60,60,.35)'; c.beginPath(); c.arc(sx, sy - 30, 12, 0, Math.PI * 2); c.fill(); }
+      break;
+    case 'switch':
+      vbox(c, x, y, .4, .4, .6, .6, 0, 30, '#6b6370'); vbox(c, x, y, .32, .32, .68, .68, 30, 40, lightsOn ? '#ffe28a' : '#d8d2c4'); break;
+    case 'fountain': {
+      vbox(c, x, y, .05, .05, .95, .95, 0, 10, '#cfc8bc'); vbox(c, x, y, .15, .15, .85, .85, 8, 11, '#4aa8e8'); vbox(c, x, y, .42, .42, .58, .58, 10, 30, '#cfc8bc');
+      const [sx, sy] = isoPt(x + .5, y + .5);
+      c.fillStyle = 'rgba(160,215,255,.75)';
+      for (let i = 0; i < 4; i++) { const ph = (t / 600 + i / 4) % 1; c.beginPath(); c.arc(sx + (i - 1.5) * 6 * ph, sy - 32 + ph * 20 - Math.sin(ph * Math.PI) * 10, 2.2, 0, Math.PI * 2); c.fill(); }
+      break;
+    }
+    case 'trophy': {
+      const col = p.ch === 'T' ? '#f2b61f' : p.ch === 'U' ? '#d9d9e3' : '#cd7f32';
+      vbox(c, x, y, .25, .25, .75, .75, 0, 18, '#3b3350'); vbox(c, x, y, .36, .36, .64, .64, 18, 24, col); vbox(c, x, y, .3, .3, .7, .7, 24, 38, col); break;
+    }
+    case 'vending':
+      vbox(c, x, y, .12, .18, .88, .82, 0, 64, '#c0392b'); vbox(c, x, y, .22, .76, .78, .84, 14, 56, '#9ad4ff'); break;
+    case 'extinguisher':
+      vbox(c, x, y, .38, .38, .62, .62, 0, 28, '#d62828'); vbox(c, x, y, .44, .44, .56, .56, 28, 34, '#2b2b33'); break;
+    case 'aquarium': {
+      vbox(c, x, y, .1, .1, .9, .9, 0, 16, '#3b3350'); vbox(c, x, y, .1, .1, .9, .9, 16, 40, '#5fb8e8');
+      const [sx, sy] = isoPt(x + .5, y + .5);
+      c.font = `10px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText('🐟', sx + Math.sin(t / 900) * 9, sy - 28);
+      c.fillText('🐠', sx + Math.cos(t / 1100) * 8, sy - 22);
+      break;
+    }
+    case 'mirror':
+      vbox(c, x, y, .1, .4, .9, .6, 0, 6, '#6b3f1d'); vbox(c, x, y, .15, .44, .85, .56, 6, 56, '#cfe7f5'); break;
+    case 'case': // glass display case
+      vbox(c, x, y, .1, .1, .9, .9, 0, 18, '#6b3f1d'); vbox(c, x, y, .14, .14, .86, .86, 18, 40, '#bfe3f0'); vbox(c, x, y, .4, .4, .6, .6, 18, 28, '#f2b61f'); break;
+    case 'mic': // microphone stand on the Q&A stage
+      vbox(c, x, y, .35, .35, .65, .65, 0, 3, '#2b2b33'); vbox(c, x, y, .46, .46, .54, .54, 3, 44, '#55555f'); vbox(c, x, y, .4, .4, .6, .6, 44, 52, '#1e1e24'); break;
+    case 'sofa':
+      vbox(c, x, y, .05, .1, .95, .9, 0, 12, '#7a1fa2'); vbox(c, x, y, .05, .1, .3, .9, 12, 26, '#8e35b8'); break;
+    case 'shelf':
+      vbox(c, x, y, .02, .3, .98, .7, 0, 50, '#6b3f1d');
+      for (let i = 0; i < 3; i++) vbox(c, x, y, .08 + i * .3, .26, .3 + i * .3, .34, 8 + (i % 2) * 18, 20 + (i % 2) * 18, ['#2f6fb0', '#c0392b', '#2e8b57'][i]);
+      break;
+  }
+  if (p.room === QA_ROOM && (p.kind === 'bench' || p.kind === 'sofa')) {
+    const [sx, sy] = isoPt(x + .5, y + .5);
+    seatHits.set(y * MAP_W + x, [[sx - 30, sy - 24], [sx + 30, sy - 24], [sx + 30, sy + 14], [sx - 30, sy + 14]]);
   }
   if (eggProps.has(y * MAP_W + x)) { // twinkle: this prop has a story
     const [sx, sy] = isoPt(x + .5, y + .5);
@@ -441,7 +507,7 @@ function drawProp(c, p, t) {
 }
 // 2 AM room: dark, with a lamp-like pool of light around the guide.
 function nightAlpha(x, y) {
-  if (blockRoomAt(x, y) !== 1) return 0;
+  if (lightsOn || blockRoomAt(x, y) !== 1) return 0;
   const d = Math.hypot(x - S.guide.rx, y - S.guide.ry);
   return .55 * Math.max(0, Math.min(1, (d - 2) / 4));
 }
@@ -487,7 +553,88 @@ function drawConfetti(dt) {
     c.save(); c.translate(p.x, p.y); c.rotate(p.r); c.fillStyle = p.c; c.fillRect(-p.s / 2, -p.s / 4, p.s, p.s / 2); c.restore();
   }
 }
-let guideSay = null, guideClicks = 0;
+let guideSay = null, guideClicks = 0, sitHinted = false;
+
+// ---- easter eggs: toasts, hidden ducks, secret passages, bugs, interactive props (all local to this viewer)
+let toastTimer = 0;
+function toast(text, ms = 3600) {
+  const h = $('hint');
+  h.classList.remove('lesson');
+  h.textContent = text;
+  h.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => h.classList.remove('show'), ms);
+}
+let lightsOn = false;
+const foundDucks = new Set(store.get('museum.ducks') || []);
+function updateDuckPill() {
+  const el = $('ducks');
+  el.hidden = foundDucks.size === 0;
+  el.textContent = `🦆 ${fa(foundDucks.size)}/${fa(ducks.length)}`;
+}
+function drawMiniDuck(c, dk, t) {
+  const b = Math.abs(Math.sin(t / 300 + dk.i)) * 2;
+  vbox(c, dk.x, dk.y, .38, .4, .62, .6, b, b + 6, '#ffd23f');
+  vbox(c, dk.x, dk.y, .42, .42, .56, .54, b + 6, b + 11, '#ffd23f');
+  vbox(c, dk.x, dk.y, .56, .45, .63, .5, b + 8, b + 10, '#ff8c1a');
+}
+function checkEggs(me) { // walking-based discoveries for this viewer's own character
+  if (!me) return;
+  const pi = passageAt(me.x, me.y);
+  if (pi >= 0 && !foundPass.has(pi)) {
+    foundPass.add(pi); store.set('museum.passages', [...foundPass]);
+    toast(EXTRA.passageFound);
+  }
+  for (const dk of ducks) {
+    if (foundDucks.has(dk.i) || Math.max(Math.abs(dk.x - me.x), Math.abs(dk.y - me.y)) > 1 || !roomSeen(blockRoomAt(dk.x, dk.y))) continue;
+    foundDucks.add(dk.i); store.set('museum.ducks', [...foundDucks]);
+    updateDuckPill();
+    if (foundDucks.size === ducks.length) { burst(); toast(EXTRA.allDucks, 6000); if (!isGuide) react(5); }
+    else toast(fmt(EXTRA.duckFound, { n: fa(foundDucks.size), total: fa(ducks.length) }));
+  }
+}
+// bugs crawl around the 2 AM office and the server closet; click to squash
+const bugAreas = areas.filter(a => a.name === 'office' || a.name === 'closet');
+const bugs = Array.from({ length: 6 }, (_, i) => {
+  const a = bugAreas[i % bugAreas.length];
+  return { a, x: a.ox + 2 + (i * 3) % (a.w - 4), y: a.oy + 2 + (i * 2) % (a.h - 4), tx: 0, ty: 0, alive: true, i };
+});
+function moveBugs(dt) {
+  for (const bg of bugs) {
+    if (!bg.alive) continue;
+    const dx = bg.tx - bg.x, dy = bg.ty - bg.y, d = Math.hypot(dx, dy);
+    if (d < .1 || !bg.tx) {
+      bg.tx = bg.a.ox + 1 + Math.random() * (bg.a.w - 3); bg.ty = bg.a.oy + 1 + Math.random() * (bg.a.h - 3);
+      continue;
+    }
+    const sp = (lightsOn ? 2.4 : .9) * dt;
+    bg.x += dx / d * Math.min(sp, d); bg.y += dy / d * Math.min(sp, d);
+  }
+}
+function drawBug(c, bg, t) {
+  const [sx, sy] = isoPt(bg.x, bg.y);
+  c.font = `13px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('🐞', sx, sy - 4 + Math.sin(t / 60 + bg.i) * .8);
+}
+function bugAt(sx, sy) {
+  const wx = (sx - vw / 2) / zoom + cam.x, wy = (sy - vh / 2) / zoom + cam.y;
+  return bugs.find(bg => bg.alive && Math.hypot(isoPt(bg.x, bg.y)[0] - wx, isoPt(bg.x, bg.y)[1] - 4 - wy) < 14);
+}
+function squash(bg) {
+  bg.alive = false;
+  const left = bugs.filter(b => b.alive).length;
+  toast(left ? fmt(EXTRA.bugSquash, { n: fa(left + 93) }) : EXTRA.allBugs);
+}
+const INTERACT = {
+  'egg.button': () => {
+    document.body.classList.remove('alarm'); void document.body.offsetWidth; document.body.classList.add('alarm');
+    setTimeout(() => document.body.classList.remove('alarm'), 2600);
+    toast(EXTRA.deploy, 4000);
+  },
+  'egg.switch': () => { lightsOn = !lightsOn; toast(lightsOn ? EXTRA.lightsOn : EXTRA.lightsOff); },
+  'egg.fountain': () => { burst(40); toast(EXTRA.wish); },
+  'egg.vending': () => toast(EXTRA.vending),
+};
 // Jumping: purely visual hop, synced to everyone (guide = id 0).
 const JUMP_MS = 520, JUMP_H = 28;
 const jumpZ = (a, t) => { const k = a.jumpAt ? (t - a.jumpAt) / JUMP_MS : 1; return k >= 0 && k < 1 ? Math.sin(Math.PI * k) * JUMP_H : 0; };
@@ -528,7 +675,7 @@ function showLesson(text) {
 }
 
 function isoGround(now) {
-  hitAreas.clear();
+  hitAreas.clear(); seatHits.clear();
   const c = gctx;
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, ground.width, ground.height);
@@ -553,7 +700,7 @@ function isoGround(now) {
   }
   for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
     const t = tileAt(x, y);
-    if (t === ' ' || t === '#' || t === 'L' || isHiddenDoor(x, y)) continue;
+    if (t === ' ' || t === 'L' || looksLikeWall(x, y)) continue;
     if (!isoTileOnScreen(x, y, 40)) continue;
     // cliff walls where the floor drops into the abyss (rock fading to black)
     if (tileAt(x, y + 1) === 'L' || tileAt(x + 1, y) === 'L') {
@@ -644,7 +791,7 @@ function drawWall(c, x, y, h, fog, frames, nearId) {
     if (fog > .005) { quad(c, [a, b, cc, d]); c.fillStyle = `rgba(11,10,16,${fog})`; c.fill(); }
   }
   // rounded rim on the exposed top edges (bullnose), so walls read curved instead of sharp
-  const wallish = (xx, yy) => tileAt(xx, yy) === '#' || isHiddenDoor(xx, yy);
+  const wallish = looksLikeWall;
   const openS = !wallish(x, y + 1), openE = !wallish(x + 1, y);
   if (openS || openE) {
     c.lineCap = 'round'; c.lineJoin = 'round';
@@ -691,7 +838,7 @@ function drawIsoRope(c, d) {
 // Walls, frames, easels, ropes and actors, depth-sorted on one canvas.
 const wallFrames = new Map(); // wall tile index -> exhibits hung on its south face
 for (const e of exhibits) {
-  if (e.y0 !== rooms[e.room].y0) continue;
+  if (!e.wall) continue;
   for (let x = e.x0; x <= e.x1; x++) {
     const k = (e.y0 - 1) * MAP_W + x;
     if (!wallFrames.has(k)) wallFrames.set(k, []);
@@ -700,14 +847,14 @@ for (const e of exhibits) {
 }
 // Wall lamps on the tall back walls (skipping tiles that carry frames).
 const lamps = [];
-for (const r of rooms) {
-  for (let x = r.ox + 2; x < r.ox + RW - 1; x += 5) {
-    const y = r.oy, k = y * MAP_W + x;
-    if (tileAt(x, y) === '#' && !wallFrames.has(k) && !wallFrames.has(k - 1) && !wallFrames.has(k + 1)) lamps.push({ x, y, face: 'S', room: r.i });
+for (const a of areas) {
+  for (let x = a.ox + 2; x < a.ox + a.w - 1; x += 5) {
+    const y = a.oy, k = y * MAP_W + x;
+    if (tileAt(x, y) === '#' && !wallFrames.has(k) && !wallFrames.has(k - 1) && !wallFrames.has(k + 1)) lamps.push({ x, y, face: 'S', room: a.room, area: a.i });
   }
-  for (let y = r.oy + 2; y < r.oy + RH - 1; y += 5) if (tileAt(r.ox, y) === '#') lamps.push({ x: r.ox, y, face: 'E', room: r.i });
+  for (let y = a.oy + 2; y < a.oy + a.h - 1; y += 5) if (tileAt(a.ox, y) === '#') lamps.push({ x: a.ox, y, face: 'E', room: a.room, area: a.i });
 }
-const lampLevel = (l, t) => (light[l.room] ?? 0) * (l.room === 1 ? .3 : 1) * (.94 + .06 * Math.sin(t / 140 + l.x * 3 + l.y));
+const lampLevel = (l, t) => (light[l.room] ?? 0) * (l.room === 1 && !lightsOn ? .3 : 1) * (.94 + .06 * Math.sin(t / 140 + l.x * 3 + l.y));
 function lampPoint(l, h) {
   const [ex, ey] = isoPt(l.x + 1, l.y), [sx, sy] = isoPt(l.x + 1, l.y + 1), [wx, wy] = isoPt(l.x, l.y + 1);
   const [a, b] = l.face === 'S' ? [[wx, wy], [sx, sy]] : [[sx, sy], [ex, ey]];
@@ -739,23 +886,23 @@ function drawLamp(c, l, h, t) {
   c.beginPath(); c.arc(px, py + 3.5, 3.4, 0, Math.PI * 2); c.fill();
 }
 
-function isoScene(t, focusRoom) {
+function isoScene(t, focusArea) {
   const c = actx;
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, actors.width, actors.height);
   setWorldTransform(c, actors);
   const kl = 1 - Math.exp(-Math.min(.1, isoDt) * 5);
-  const f = focusRoom >= 0 ? rooms[focusRoom] : null;
-  for (const r of rooms) {
-    const target = f && (r.ox > f.ox || r.oy > f.oy) ? 1 : 0;
-    lowered[r.i] += (target - lowered[r.i]) * kl;
+  const f = focusArea >= 0 ? areas[focusArea] : null;
+  for (const a of areas) { // areas entirely in front of the focus area lower their back walls
+    const target = f && (a.ox >= f.ox + f.w || a.oy >= f.oy + f.h) ? 1 : 0;
+    lowered[a.i] += (target - lowered[a.i]) * kl;
   }
   const items = [];
   for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
-    if ((tileAt(x, y) !== '#' && !isHiddenDoor(x, y)) || !isoTileOnScreen(x, y, 90)) continue;
-    const b = blockRoomAt(x, y), r = rooms[b];
+    if (!looksLikeWall(x, y) || !isoTileOnScreen(x, y, 90)) continue;
+    const ai = areaAt(x, y), r = areas[ai], b = r.room;
     const back = y === r.oy || x === r.ox;
-    const h = back ? WALL_TALL + (WALL_SHORT - WALL_TALL) * lowered[b] : WALL_SHORT;
+    const h = back ? WALL_TALL + (WALL_SHORT - WALL_TALL) * lowered[ai] : WALL_SHORT;
     const fog = 1 - (1 - (1 - (light[b] ?? 1)) * FOG_MAX) * (1 - nightAlpha(x, y));
     // frames hang on the wall tile above an exhibit's first tile; draw them with that tile only
     const fr = wallFrames.get(y * MAP_W + x) && y === r.oy ? wallFrames.get(y * MAP_W + x) : null;
@@ -763,10 +910,18 @@ function isoScene(t, focusRoom) {
   }
   for (const l of lamps) {
     if (!isoTileOnScreen(l.x, l.y, 100)) continue;
-    const b = l.room, r = rooms[b];
-    const h = WALL_TALL + (WALL_SHORT - WALL_TALL) * lowered[b];
+    const h = WALL_TALL + (WALL_SHORT - WALL_TALL) * lowered[l.area];
     if (h < 40) continue;
     items.push({ d: l.x + l.y + 2.5, k: 0, draw: () => drawLamp(c, l, h, t) });
+  }
+  for (const dk of ducks) {
+    if (foundDucks.has(dk.i) || !isoTileOnScreen(dk.x, dk.y, 60)) continue;
+    const fog = (1 - (light[blockRoomAt(dk.x, dk.y)] ?? 1)) * FOG_MAX;
+    items.push({ d: dk.x + dk.y + 1, k: 1, draw: () => { curFog = fog; drawMiniDuck(c, dk, t); curFog = 0; } });
+  }
+  for (const bg of bugs) {
+    if (!bg.alive || !roomSeen(1)) continue;
+    items.push({ d: bg.x + bg.y + 1, k: 1, draw: () => drawBug(c, bg, t) });
   }
   for (const pr of props) {
     if (!isoTileOnScreen(pr.x, pr.y, 90)) continue;
@@ -774,13 +929,13 @@ function isoScene(t, focusRoom) {
     items.push({ d: pr.x + pr.y + 1, k: 0, draw: () => { curFog = fog; drawProp(c, pr, t); curFog = 0; } });
   }
   for (const e of exhibits) {
-    if (e.prop || e.y0 === rooms[e.room].y0) continue; // props draw themselves; wall-mounted frames draw with their wall
+    if (e.prop || e.wall) continue; // props draw themselves; wall-mounted frames draw with their wall
     if (!isoTileOnScreen(e.x0, e.y0, 120)) continue;
     const yy = e.y0 + .55;
     items.push({ d: (e.x0 + e.x1 + 1) / 2 + yy + .4, k: 1, draw: () => drawPanel(c, e.x0 + .05, yy, e.x1 + .95, yy, 10, 80, e.id, e.id === nearId, true) });
   }
   for (const d of doors) {
-    if (d.room <= S.unlocked || d.room === SECRET_ROOM) continue;
+    if (d.open || d.room <= S.unlocked || d.room === SECRET_ROOM) continue;
     items.push({ d: (d.x0 + d.x1 + 1) / 2 + (d.y0 + d.y1 + 1) / 2, k: 1, draw: () => drawIsoRope(c, d) });
   }
   const me = S.me != null ? S.players.get(S.me) : null;
@@ -809,13 +964,14 @@ let isoDt = 0;
 const ISO_D = 76, ISO_GUIDE_D = 86;
 function drawIsoActor(c, a, t, opts, labels) {
   const [cx, feet0] = isoPt(a.rx + .5, a.ry + .5);
-  const moving = Math.abs(a.rx - a.x) + Math.abs(a.ry - a.y) > .04;
+  const moving = !a.sit && Math.abs(a.rx - a.x) + Math.abs(a.ry - a.y) > .04;
   // abyss: fall down past the edge and vanish into the dark
   if (tileAt(a.x, a.y) === 'L') { if (!a.lavaAt) a.lavaAt = t; } else a.lavaAt = 0;
   const sink = a.lavaAt ? Math.min(1, (t - a.lavaAt) / 1100) : 0;
   const Dsz = opts.guide ? ISO_GUIDE_D : ISO_D;
   const jz = jumpZ(a, t);
-  const feet = feet0 + (sink ? sink * sink * 150 : 0) - jz;
+  const seated = a.sit && !sink;
+  const feet = feet0 + (sink ? sink * sink * 150 : 0) - jz + (seated ? 10 : 0);
   if (sink) {
     if (sink < .6) labels.push(() => {
       c.globalAlpha = 1 - sink / .6;
@@ -827,8 +983,9 @@ function drawIsoActor(c, a, t, opts, labels) {
     c.beginPath(); c.rect(cx - Dsz, feet0 + 6 - Dsz * 2, Dsz * 2, Dsz * 2); c.clip();
     c.globalAlpha = 1 - sink * .7;
   }
+  if (seated) { c.save(); c.beginPath(); c.rect(cx - Dsz, feet0 - 13 - Dsz * 2, Dsz * 2, Dsz * 2); c.clip(); }
   c.fillStyle = 'rgba(0,0,0,.22)';
-  if (!sink) { const sh = 1 - jz / (JUMP_H * 2.2); c.beginPath(); c.ellipse(cx, feet0, TW * .26 * sh, TH * .26 * sh, 0, 0, Math.PI * 2); c.fill(); }
+  if (!sink && !a.sit) { const sh = 1 - jz / (JUMP_H * 2.2); c.beginPath(); c.ellipse(cx, feet0, TW * .26 * sh, TH * .26 * sh, 0, 0, Math.PI * 2); c.fill(); }
   if (opts.me) {
     c.strokeStyle = '#19d3f0'; c.lineWidth = 3;
     c.beginPath(); c.ellipse(cx, feet0, TW * .36 + Math.sin(t / 250) * 2, TH * .36 + Math.sin(t / 250), 0, 0, Math.PI * 2); c.stroke();
@@ -857,6 +1014,7 @@ function drawIsoActor(c, a, t, opts, labels) {
     headY = cy - r;
   }
   c.restore();
+  if (seated) c.restore();
   if (a.avatar === 10 && !sink) drawSticker(c, a.name, cx, feet - Dsz * .34);
   if (sink) { c.globalAlpha = 1; c.restore(); return; }
   if (opts.label) labels.push(() => drawLabel(c, opts.label, cx, headY - 8, opts.guide));
@@ -1023,8 +1181,9 @@ const hostState = () => ({
   x: S.guide.x, y: S.guide.y, unlocked: S.unlocked, discovered: S.discovered, secret: S.secret, secretSeen: S.secretSeen, spotlight: S.spotlight,
   puzzle: { open: S.puzzle.open, remaining: Math.max(0, Math.round(S.puzzle.endsAt - now())), revealed: S.puzzle.revealed, seq: S.puzzle.seq },
 });
+let replaced = false; // another guide window took over: this one stops steering
 function hostSend() {
-  if (role === 'host' && sock && sock.connected) sock.emit('host:state', hostState());
+  if (role === 'host' && !replaced && sock && sock.connected) sock.emit('host:state', hostState());
 }
 
 function moveGuide(dx, dy) {
@@ -1054,6 +1213,18 @@ function setUnlocked(n) {
   saveGuide();
   hostSend('unlock');
 }
+// Join overlay: QR code + link to the public visitor page (server knows the public URL).
+async function toggleJoin() {
+  const el = $('joinQR');
+  if (!el.hidden) { el.hidden = true; return; }
+  el.querySelector('.jq-title').textContent = EXTRA.joinTitle;
+  try {
+    const { url } = await fetch('/join.json', { cache: 'no-store' }).then(r => r.json());
+    el.querySelector('.jq-url').textContent = url;
+    el.querySelector('img').src = '/qr.svg?t=' + Date.now();
+  } catch { el.querySelector('.jq-url').textContent = location.origin + '/'; }
+  el.hidden = false;
+}
 function setSecret(on) {
   S.secret = on;
   if (!on && S.room !== SECRET_ROOM) S.secretSeen = false;
@@ -1069,6 +1240,24 @@ function setSpotlight(id) {
 function setPuzzle(v) {
   S.puzzle = { ...S.puzzle, ...v };
   hostSend('puzzle');
+}
+// Code 0912: guide back to the lobby, tour state reset; robots follow, visitors stay where they are.
+function fullReset() {
+  S.puzzle = { ...S.puzzle, open: false, revealed: false };
+  S.spotlight = null; spotDismissed = null; renderSpot();
+  S.unlocked = 0; S.discovered = 0; S.secret = false; S.secretSeen = false;
+  const sp = rooms[0].spawn;
+  Object.assign(S.guide, { x: sp.x, y: sp.y, rx: sp.x, ry: sp.y, fallAt: 0, lavaAt: 0 });
+  saveGuide();
+  if (role === 'host' && !replaced && sock?.connected) sock.emit('host:reset', hostState()); // one atomic message
+  toast(EXTRA.resetDone, 4000);
+}
+let codeBuf = '', codeAt = 0;
+function guideCode(digit) { // typed digit codes (guide only)
+  const t = now();
+  codeBuf = (t - codeAt > 3000 ? '' : codeBuf) + digit;
+  codeAt = t;
+  if (codeBuf.endsWith('0912')) { codeBuf = ''; fullReset(); }
 }
 function resetAll() {
   setPuzzle({ open: false, revealed: false });
@@ -1132,7 +1321,8 @@ addEventListener('keydown', ev => {
         break;
       }
       case 'Escape':
-        if (cardId) closeCard();
+        if (!$('joinQR').hidden) $('joinQR').hidden = true;
+        else if (cardId) closeCard();
         else if (!$('help').hidden) toggleHelp(false);
         else if (S.spotlight) setSpotlight(null);
         else if (S.puzzle.open) setPuzzle({ open: false });
@@ -1145,10 +1335,12 @@ addEventListener('keydown', ev => {
         break;
       case 'KeyK': toggleHelp(); break;
       case 'KeyO': setSecret(!S.secret); break;
+      case 'KeyJ': toggleJoin(); break;
       case 'Space': jump(); break;
-      case 'Home': if (ev.shiftKey) resetAll(); break;
+      case 'Home': if (ev.shiftKey) fullReset(); break;
       default:
-        if (ev.shiftKey && /^Digit[0-7]$/.test(code)) teleport(Number(code[5]));
+        if (ev.shiftKey && /^Digit[0-8]$/.test(code)) teleport(Number(code[5]));
+        else if (/^(?:Digit|Numpad)[0-9]$/.test(code)) guideCode(code.slice(-1));
     }
   } else {
     if (DIRS[code]) {
@@ -1191,10 +1383,10 @@ function setOnline(n) {
   el.textContent = fmt(UI.online, { n: fa(n) });
   el.hidden = role === 'solo';
 }
-function upsertPlayer([id, x, y, avatar, name]) {
+function upsertPlayer([id, x, y, avatar, name, sit]) {
   const old = S.players.get(id);
-  if (old) Object.assign(old, { avatar, name });
-  else S.players.set(id, { id, x, y, rx: x, ry: y, avatar, name, face: 1, dir: 0, phase: Math.random() * 4, react: null });
+  if (old) Object.assign(old, { avatar, name, sit: !!sit });
+  else S.players.set(id, { id, x, y, rx: x, ry: y, avatar, name, sit: !!sit, face: 1, dir: 0, phase: Math.random() * 4, react: null });
 }
 function applyMeta(m) {
   if (role === 'visitor') {
@@ -1304,8 +1496,14 @@ $('stage').addEventListener('pointermove', ev => {
   if (ev.pointerType === 'mouse') $('stage').style.cursor = openableAt(ev.clientX, ev.clientY) ? 'pointer' : '';
 });
 $('stage').addEventListener('pointerup', ev => {
+  if (role === 'visitor' && joined && roomSeen(QA_ROOM)) { // tap a Q&A bench / sofa to sit on it
+    const wx = (ev.clientX - vw / 2) / zoom + cam.x, wy = (ev.clientY - vh / 2) / zoom + cam.y;
+    for (const [k, poly] of seatHits) if (inPoly(wx, wy, poly)) { sock.emit('sit', [k % MAP_W, Math.floor(k / MAP_W)]); manualUntil = now() + 60000; return; }
+  }
+  const bg = ISO && roomSeen(1) ? bugAt(ev.clientX, ev.clientY) : null;
+  if (bg) { squash(bg); return; }
   const exId = openableAt(ev.clientX, ev.clientY);
-  if (exId) { openCard(exId); return; } // everyone can open what they see on the walls
+  if (exId) { if (INTERACT[exId]) INTERACT[exId](); else openCard(exId); return; } // everyone can open what they see
   if (role !== 'visitor' || !joined) return;
   // easter egg: poke the guide 5 times
   const [gx, gy] = ISO ? isoPt(S.guide.rx + .5, S.guide.ry + .5) : [(S.guide.rx + .5) * T, (S.guide.ry + .86) * T];
@@ -1338,11 +1536,12 @@ if (role !== 'solo') {
   sock.on('connect', () => {
     everConnected = true;
     rc.hidden = true;
-    if (role === 'host') sock.emit('host:hello', { token: params.get('host'), state: hostState() });
+    if (role === 'host') { if (!replaced) sock.emit('host:hello', { token: params.get('host'), state: hostState() }); }
     else sendJoin();
   });
   sock.on('disconnect', () => { rc.hidden = false; });
   sock.on('host:denied', () => { rc.textContent = 'HOST TOKEN ✗'; rc.hidden = false; });
+  sock.on('host:replaced', () => { replaced = true; rc.textContent = EXTRA.hostReplaced; rc.hidden = false; });
   sock.on('host:ok', m => { applySnap(m); });
   sock.on('welcome', m => {
     S.me = m.me;
@@ -1353,6 +1552,7 @@ if (role !== 'solo') {
   sock.on('snap', applySnap);
   sock.on('meta', applyMeta);
   sock.on('pjoin', upsertPlayer);
+  sock.on('sit', ([id, v]) => { const p = S.players.get(id); if (p) { p.sit = !!v; p.isoRow = 0; p.isoFlip = false; } });
   sock.on('j', id => {
     if (id === 0) { if (role === 'visitor') S.guide.jumpAt = now(); return; }
     const p = S.players.get(id);
@@ -1382,7 +1582,7 @@ if (role !== 'solo') {
   });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && sock.connected) {
-      if (role === 'host') sock.emit('host:state', hostState());
+      if (role === 'host') hostSend();
       sock.emit('sync');
     }
   });
@@ -1412,6 +1612,9 @@ function frame() {
     nextStep = t + STEP_MS;
   }
 
+  moveBugs(dt);
+  checkEggs(isGuide ? S.guide : (S.me != null ? S.players.get(S.me) : null));
+
   // jumped into the abyss: the lesson appears for everyone shortly after
   const onPit = tileAt(S.guide.x, S.guide.y) === 'L';
   if (onPit && !S.guide.pitSeen) { S.guide.pitSeen = true; setTimeout(() => showLesson(EXTRA.abyssLesson), 2200); }
@@ -1436,7 +1639,10 @@ function frame() {
 
   // room change
   const r = roomAt(S.guide.x, S.guide.y);
-  if (r >= 0 && r !== S.room) { S.room = r; showBanner(r); }
+  if (r >= 0 && r !== S.room) {
+    S.room = r; showBanner(r); if (zoomOut) computeZoom();
+    if (r === QA_ROOM && role === 'visitor' && joined && !sitHinted) { sitHinted = true; setTimeout(() => toast(EXTRA.sitHint, 5000), 3500); }
+  }
   if (isGuide && r === SECRET_ROOM && !S.secretSeen) { S.secretSeen = true; saveGuide(); hostSend(); }
   else if (isGuide && r >= 0 && r < SECRET_ROOM && r > S.discovered) { S.discovered = r; saveGuide(); hostSend(); }
 
@@ -1468,7 +1674,7 @@ function frame() {
   if (ISO) {
     isoDt = dt;
     isoGround(t);
-    isoScene(t, blockRoomAt(focus.x, focus.y));
+    isoScene(t, areaAt(focus.x, focus.y));
   } else {
     drawGround(nearId);
     drawActors(t);
@@ -1478,6 +1684,7 @@ function frame() {
 }
 
 window.__museum = { S };
+updateDuckPill();
 renderSpot();
 document.fonts?.load('700 13px Vazirmatn').catch(() => {});
 requestAnimationFrame(frame);

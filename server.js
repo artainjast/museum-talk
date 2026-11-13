@@ -4,7 +4,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
-import { MAP_W, MAP_H, rooms, isWalkable, blockRoomAt, tileAt, SECRET_ROOM } from './public/map.js';
+import QRCode from 'qrcode';
+import { MAP_W, MAP_H, rooms, props, isWalkable, blockRoomAt, tileAt, SECRET_ROOM } from './public/map.js';
 import { UI, EXHIBITS, BOT_NAMES } from './public/content.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -13,9 +14,19 @@ const HOST_TOKEN = process.env.HOST_TOKEN || crypto.randomBytes(6).toString('hex
 
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', true); // behind Cloudflare Tunnel / nginx: honour X-Forwarded-Proto/Host
 app.use('/fonts', express.static(path.join(__dirname, 'node_modules/vazirmatn/fonts/webfonts'), { maxAge: '7d' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', (_req, res) => res.send('ok'));
+// Public visitor link (PUBLIC_URL if set, else the address this request came in on) + its QR code.
+const publicUrl = req => process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}/`;
+app.get('/join.json', (req, res) => res.json({ url: publicUrl(req) }));
+app.get('/qr.svg', async (req, res) => {
+  try {
+    const svg = await QRCode.toString(publicUrl(req), { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
+    res.type('image/svg+xml').set('Cache-Control', 'no-store').send(svg);
+  } catch (err) { res.status(500).send('qr error'); }
+});
 
 const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 1e4, pingInterval: 10000, pingTimeout: 20000, perMessageDeflate: { threshold: 256 } });
@@ -103,6 +114,9 @@ function placeNear(p) {
   dirty.add(p);
 }
 
+const QA_ROOM = 7;
+const seats = new Set(props.filter(pr => pr.room === QA_ROOM && (pr.kind === 'bench' || pr.kind === 'sofa')).map(pr => pr.y * MAP_W + pr.x));
+
 const NB = [-1, 1, -MAP_W, MAP_W];
 function neighbours(i, m = walk) {
   const x = i % MAP_W, out = [];
@@ -113,6 +127,15 @@ function neighbours(i, m = walk) {
     out.push(n);
   }
   return out;
+}
+
+function standUp(p) {
+  if (p.seat < 0) return;
+  const was = p.sitting;
+  const adj = [...NB.map(o => p.seat + o)].find(n => n >= 0 && n < N && walk[n]);
+  if (was && adj !== undefined) { p.x = adj % MAP_W; p.y = (adj / MAP_W) | 0; dirty.add(p); }
+  p.sitting = false; p.seat = -1;
+  if (was) io.emit('sit', [p.id, 0]);
 }
 
 function stepPlayer(p, t) {
@@ -141,12 +164,26 @@ function stepPlayer(p, t) {
     }
     return;
   }
-  if (p.goal >= 0) { // tap-to-move
+  if (p.sitting) { // seated in the Q&A room: stay, unless the guide has left it (a reset leaves them seated)
+    if (!p.parked && blockRoomAt(st.gx, st.gy) !== QA_ROOM) { standUp(p); p.manualUntil = 0; }
+    return;
+  }
+  if (p.goal >= 0) { // tap-to-move (or walking to a seat)
     const gf = goalField(p.goal), gd = gf[i];
-    if (gd <= 0) { p.goal = -1; p.manualUntil = t + MANUAL_MS; return; }
+    if (gd === 0 && p.seat >= 0) { // reached the seat: sit down on it
+      p.goal = -1; p.sitting = true;
+      p.x = p.seat % MAP_W; p.y = (p.seat / MAP_W) | 0; dirty.add(p);
+      io.emit('sit', [p.id, 1]);
+      return;
+    }
+    if (gd <= 0) { p.goal = -1; p.seat = -1; p.manualUntil = t + MANUAL_MS; return; }
     const c = neighbours(i).filter(n => gf[n] === gd - 1);
     if (c.length) { const n = c[(Math.random() * c.length) | 0]; p.x = n % MAP_W; p.y = (n / MAP_W) | 0; dirty.add(p); }
     return;
+  }
+  if (p.parked) { // left where they were by a guide reset; rejoin once the guide comes near
+    const d0 = field[i];
+    if (d0 >= 0 && d0 <= 8) p.parked = false; else return;
   }
   if (t < p.manualUntil) return; // moved by themselves recently: stay put
   const f = field;
@@ -172,7 +209,7 @@ const metaMsg = () => ({
   spotlight: st.spotlight,
   puzzle: { open: st.puzzle.open, remaining: Math.max(0, st.puzzle.endsAt - Date.now()), revealed: st.puzzle.revealed, seq: st.puzzle.seq },
 });
-const playerRow = p => [p.id, p.x, p.y, p.avatar, p.name];
+const playerRow = p => [p.id, p.x, p.y, p.avatar, p.name, p.sitting ? 1 : 0];
 const onlineCount = () => { let n = 0; for (const p of players.values()) if (p.connected && !p.bot) n++; return n; };
 const snapshot = () => ({ g: [st.gx, st.gy], meta: metaMsg(), players: [...players.values()].map(playerRow), n: onlineCount() });
 
@@ -222,6 +259,8 @@ io.on('connection', socket => {
 
   socket.on('host:hello', safe((msg) => {
     if (!msg || typeof msg.token !== 'string' || msg.token !== HOST_TOKEN) { socket.emit('host:denied'); return; }
+    // only one guide window at a time: the previous one is told to stand down instead of fighting over the guide
+    if (hostId && hostId !== socket.id) io.sockets.sockets.get(hostId)?.emit('host:replaced');
     hostId = socket.id;
     applyHostState(msg.state);
     socket.emit('host:ok', snapshot());
@@ -230,6 +269,15 @@ io.on('connection', socket => {
   socket.on('host:state', safe((s) => {
     if (socket.id !== hostId) return;
     applyHostState(s);
+  }));
+
+  // guide reset (code 0912) in one message: park visitors first, then apply the new state, then bring the robots
+  socket.on('host:reset', safe((state) => {
+    if (socket.id !== hostId) return;
+    for (const p of players.values()) if (!p.bot) { p.parked = true; p.goal = -1; }
+    applyHostState(state);
+    refreshField();
+    for (const p of players.values()) if (p.bot) { p.fallAt = 0; placeNear(p); }
   }));
 
   // jumps are cosmetic: just relay them (guide = id 0)
@@ -261,7 +309,7 @@ io.on('connection', socket => {
       if (!name) name = UI.defaultName.replace('{n}', nf.format(++visitorNo));
       p = {
         id: nextId++, sessionId: sid || crypto.randomBytes(8).toString('hex'), socketId: socket.id, connected: true, goneAt: 0,
-        name, avatar, x: st.gx, y: st.gy, space: 2 + ((Math.random() * 4) | 0), nextAt: 0,
+        name, avatar, x: st.gx, y: st.gy, space: 2 + ((Math.random() * 4) | 0), nextAt: 0, seat: -1, sitting: false, parked: false,
         goal: -1, manualUntil: 0, lastStep: 0, lastGoto: 0,
       };
       placeNear(p);
@@ -285,6 +333,7 @@ io.on('connection', socket => {
     if (!Number.isInteger(dx) || !Number.isInteger(dy) || Math.abs(dx) + Math.abs(dy) !== 1) return;
     if (t - p.lastStep < 100) return;
     p.lastStep = t;
+    standUp(p); p.parked = false;
     p.goal = -1;
     p.manualUntil = t + MANUAL_MS;
     const x = p.x + dx, y = p.y + dy;
@@ -299,8 +348,27 @@ io.on('connection', socket => {
     const [x, y] = pos;
     if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= MAP_W || y >= MAP_H || !walk[y * MAP_W + x]) return;
     p.lastGoto = t;
+    standUp(p); p.parked = false;
     p.goal = y * MAP_W + x;
     p.manualUntil = t + MANUAL_MS;
+  }));
+
+  // sit on a free bench / sofa seat in the Q&A room (walk next to it first)
+  socket.on('sit', safe((pos) => {
+    const p = players.get(socket.data.pid);
+    if (!p || !Array.isArray(pos)) return;
+    const [x, y] = pos;
+    if (!Number.isInteger(x) || !Number.isInteger(y)) return;
+    const k = y * MAP_W + x;
+    if (!seats.has(k) || !(QA_ROOM <= st.discovered)) return;
+    for (const q of players.values()) if (q !== p && q.seat === k) return; // taken
+    const adj = NB.map(o => k + o).filter(n => n >= 0 && n < N && walk[n]);
+    if (!adj.length) return;
+    standUp(p); p.parked = false;
+    const here = p.y * MAP_W + p.x;
+    p.seat = k;
+    p.goal = adj.sort((a, b) => Math.abs(a - here) - Math.abs(b - here))[0];
+    p.manualUntil = Infinity;
   }));
 
 
@@ -324,7 +392,7 @@ for (let k = 1; k <= BOTS; k++) {
   const p = {
     id: nextId++, sessionId: 'bot-' + k, socketId: null, connected: true, goneAt: 0, bot: true,
     name: BOT_NAMES[k - 1].name, avatar: 10, x: st.gx, y: st.gy, space: 1 + (k % 3), nextAt: 0,
-    goal: -1, manualUntil: 0, lastStep: 0, lastGoto: 0, fallAt: 0,
+    goal: -1, manualUntil: 0, lastStep: 0, lastGoto: 0, fallAt: 0, seat: -1, sitting: false, parked: false,
   };
   placeNear(p);
   players.set(p.id, p);

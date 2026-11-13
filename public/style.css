@@ -184,3 +184,18 @@ mark.ct { background: transparent; color: inherit; border-radius: 5px; padding: 
 .pz-answers p { margin: 6px 0; font-weight: 700; }
 .pz-answers .code { background: #f1ebe0; border-radius: 4px; padding: 0 .25em; }
 .pz-moral { font-size: 1.15em; color: #7a1fa2; margin-top: 12px !important; }
+
+/* ---------- easter eggs */
+#ducks { right: 12px; }
+#alarm { position: fixed; inset: 0; z-index: 25; pointer-events: none; opacity: 0; background: radial-gradient(ellipse at center, rgba(255, 0, 0, 0) 30%, rgba(255, 0, 0, .55) 100%); }
+body.alarm #alarm { animation: alarm .45s ease-in-out 6 alternate; }
+body.alarm #stage { animation: shake .09s linear 12; }
+@keyframes alarm { from { opacity: 0; } to { opacity: 1; } }
+@keyframes shake { 0% { transform: translate(0, 0); } 25% { transform: translate(-6px, 3px); } 50% { transform: translate(5px, -4px); } 75% { transform: translate(-3px, -2px); } 100% { transform: translate(0, 0); } }
+
+/* ---------- join QR (guide: J) */
+#joinQR { position: fixed; inset: 0; z-index: 45; display: flex; align-items: center; justify-content: center; background: rgba(10, 8, 16, .55); }
+.jq-box { background: #fff; border: 6px solid var(--gold); border-radius: 22px; padding: 22px 26px; text-align: center; box-shadow: 0 20px 60px rgba(0, 0, 0, .5); }
+.jq-title { margin: 0 0 10px; font-weight: 900; font-size: clamp(20px, 2.6vw, 32px); }
+.jq-box img { width: min(56vh, 70vw); height: min(56vh, 70vw); image-rendering: pixelated; display: block; margin: 0 auto; }
+.jq-url { margin: 10px 0 0; font: 700 clamp(16px, 2vw, 26px) ui-monospace, Menlo, monospace; color: #1e1a2b; }
