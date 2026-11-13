@@ -1241,14 +1241,30 @@ function setPuzzle(v) {
   S.puzzle = { ...S.puzzle, ...v };
   hostSend('puzzle');
 }
+// Local easter-egg progress (ducks, passages, bugs, lights) back to the start.
+function clearEggs() {
+  foundDucks.clear(); store.set('museum.ducks', []);
+  foundPass.clear(); store.set('museum.passages', []);
+  for (const bg of bugs) bg.alive = true;
+  lightsOn = false;
+  updateDuckPill();
+}
+// Code 0910: the whole game back to the start — tour state, everyone (visitors + robots) in the lobby, eggs hidden again.
+function gameReset() {
+  fullReset(true);
+  clearEggs();
+  if (role === 'host' && !replaced && sock?.connected) sock.emit('host:resetAll', hostState());
+  toast(EXTRA.gameReset, 4000);
+}
 // Code 0912: guide back to the lobby, tour state reset; robots follow, visitors stay where they are.
-function fullReset() {
+function fullReset(localOnly) {
   S.puzzle = { ...S.puzzle, open: false, revealed: false };
   S.spotlight = null; spotDismissed = null; renderSpot();
   S.unlocked = 0; S.discovered = 0; S.secret = false; S.secretSeen = false;
   const sp = rooms[0].spawn;
   Object.assign(S.guide, { x: sp.x, y: sp.y, rx: sp.x, ry: sp.y, fallAt: 0, lavaAt: 0 });
   saveGuide();
+  if (localOnly) return;
   if (role === 'host' && !replaced && sock?.connected) sock.emit('host:reset', hostState()); // one atomic message
   toast(EXTRA.resetDone, 4000);
 }
@@ -1258,6 +1274,7 @@ function guideCode(digit) { // typed digit codes (guide only)
   codeBuf = (t - codeAt > 3000 ? '' : codeBuf) + digit;
   codeAt = t;
   if (codeBuf.endsWith('0912')) { codeBuf = ''; fullReset(); }
+  else if (codeBuf.endsWith('0910')) { codeBuf = ''; gameReset(); }
 }
 function resetAll() {
   setPuzzle({ open: false, revealed: false });
@@ -1552,6 +1569,11 @@ if (role !== 'solo') {
   sock.on('snap', applySnap);
   sock.on('meta', applyMeta);
   sock.on('pjoin', upsertPlayer);
+  sock.on('gameReset', () => {
+    if (isGuide) return; // the guide already reset itself
+    clearEggs(); closeCard(); manualUntil = 0; spotDismissed = null;
+    toast(EXTRA.gameReset, 4000);
+  });
   sock.on('sit', ([id, v]) => { const p = S.players.get(id); if (p) { p.sit = !!v; p.isoRow = 0; p.isoFlip = false; } });
   sock.on('j', id => {
     if (id === 0) { if (role === 'visitor') S.guide.jumpAt = now(); return; }

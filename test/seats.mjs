@@ -36,9 +36,14 @@ if (sits.get(vis[0].id) !== 0) fail('seated visitor did not stand up when the gu
 
 // reset (what the 0912 code sends): guide to the lobby, tour state back to the start, then host:reset
 await sleep(2000);
-const before = new Map(vis.map(v => [v.id, { ...ctx.players.get(v.id) }]));
+const where = () => new Map(vis.map(v => [v.id, { ...ctx.players.get(v.id) }]));
+const pre = where();
 Object.assign(S, { x: rooms[0].spawn.x, y: rooms[0].spawn.y, unlocked: 0, discovered: 0 });
 ctx.host.emit('host:reset', S);
+await sleep(400); // let any in-flight position update land
+const before = where();
+const teleported = vis.filter(v => Math.abs(pre.get(v.id).x - before.get(v.id).x) + Math.abs(pre.get(v.id).y - before.get(v.id).y) > 2).length;
+if (teleported) fail(`${teleported} visitors were moved by the reset`);
 await sleep(3000);
 const robots = [...ctx.players.values()].filter(p => p.av === 10);
 const robotsHome = robots.filter(p => blockRoomAt(p.x, p.y) === 0).length;
@@ -46,5 +51,15 @@ const moved = vis.filter(v => { const a = before.get(v.id), b = ctx.players.get(
 console.log(`after reset: robots in lobby ${robotsHome}/${robots.length}; visitors that moved ${moved}/${vis.length}`);
 if (robotsHome !== robots.length) fail('robots did not return to the lobby');
 if (moved) fail('visitors moved after reset');
+// full game reset (code 0910): everyone back in the lobby, and every visitor is told
+const told = new Set();
+vis.forEach(v => v.s.on('gameReset', () => told.add(v.id)));
+const [qx, qy] = [rooms[0].spawn.x + 1, rooms[0].spawn.y];
+Object.assign(S, { x: qx, y: qy });
+ctx.host.emit('host:resetAll', S);
+await sleep(2500);
+const inLobby = [...ctx.players.values()].filter(p => blockRoomAt(p.x, p.y) === 0).length;
+console.log(`after full reset: ${inLobby}/${ctx.players.size} in the lobby, ${told.size}/${vis.length} visitors notified`);
+if (inLobby !== ctx.players.size || told.size !== vis.length) fail('full reset did not bring everyone back');
 console.log(ok ? 'PASS' : 'FAIL');
 process.exit(ok ? 0 : 1);

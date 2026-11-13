@@ -280,6 +280,16 @@ io.on('connection', socket => {
     for (const p of players.values()) if (p.bot) { p.fallAt = 0; placeNear(p); }
   }));
 
+  // full game reset (code 0910): tour state back to the start and EVERYONE (visitors + robots) back to the lobby
+  socket.on('host:resetAll', safe((state) => {
+    if (socket.id !== hostId) return;
+    for (const p of players.values()) { standUp(p); p.parked = false; p.goal = -1; p.manualUntil = 0; p.fallAt = 0; }
+    applyHostState(state);
+    refreshField();
+    for (const p of players.values()) placeNear(p);
+    io.emit('gameReset');
+  }));
+
   // jumps are cosmetic: just relay them (guide = id 0)
   let lastJump = 0;
   socket.on('host:jump', safe(() => { if (socket.id === hostId) io.emit('j', 0); }));
