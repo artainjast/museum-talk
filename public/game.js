@@ -142,7 +142,26 @@ function visibleRange() {
   };
 }
 
+// Clickable exhibits: polygons (world px) recorded while drawing, so a tap opens what you see.
+const hitAreas = new Map(); // exhibit id -> [[x, y], ...]
+function inPoly(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function exhibitAt(sx, sy) {
+  const wx = (sx - vw / 2) / zoom + cam.x, wy = (sy - vh / 2) / zoom + cam.y;
+  for (const [id, poly] of hitAreas) if (inPoly(wx, wy, poly)) return id;
+  return null;
+}
+const exById = new Map(exhibits.map(e => [e.id, e]));
+const eggPropId = new Map(exhibits.filter(e => e.prop).map(e => [e.y0 * MAP_W + e.x0, e.id]));
+
 function drawGround(nearId) {
+  hitAreas.clear();
   const c = gctx;
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, ground.width, ground.height);
@@ -173,6 +192,8 @@ function drawGround(nearId) {
     else if (FLAT_PROP[t]) {
       c.font = `${T * .7}px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
       c.fillText(FLAT_PROP[t], px + T / 2, py + T / 2);
+      const egg = eggPropId.get(y * MAP_W + x);
+      if (egg) hitAreas.set(egg, [[px, py], [px + T, py], [px + T, py + T], [px, py + T]]);
     }
   }
   // exhibits
@@ -197,6 +218,7 @@ function drawFrame(c, e, glow) {
   const top = onWall ? e.y0 * T - T * .5 : e.y0 * T + 1;
   const bot = onWall ? (e.y1 + 1) * T - 4 : (e.y1 + 1) * T - 8;
   const w = right - left, h = bot - top;
+  hitAreas.set(e.id, [[left, top], [right, top], [right, bot], [left, bot]]);
   if (!onWall) { c.fillStyle = '#4a2a12'; c.fillRect(left + 5, bot - 2, 3, 9); c.fillRect(right - 8, bot - 2, 3, 9); }
   c.fillStyle = 'rgba(0,0,0,.18)'; c.fillRect(left + 2, top + 4, w, h);
   c.fillStyle = '#6b3f1d'; c.fillRect(left, top, w, h);
@@ -410,6 +432,7 @@ function drawProp(c, p, t) {
   }
   if (eggProps.has(y * MAP_W + x)) { // twinkle: this prop has a story
     const [sx, sy] = isoPt(x + .5, y + .5);
+    hitAreas.set(eggPropId.get(y * MAP_W + x), [[sx - 28, sy - 60], [sx + 28, sy - 60], [sx + 28, sy + 10], [sx - 28, sy + 10]]);
     c.globalAlpha = .5 + .5 * Math.sin(t / 300 + x);
     c.font = `14px ${EMOJI_FONT}`; c.textAlign = 'center'; c.textBaseline = 'middle';
     c.fillText('✨', sx + 14, sy - 52);
@@ -505,6 +528,7 @@ function showLesson(text) {
 }
 
 function isoGround(now) {
+  hitAreas.clear();
   const c = gctx;
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, ground.width, ground.height);
@@ -568,6 +592,7 @@ function drawPanel(c, xa, ya, xb, yb, z0, z1, id, glow, legs) {
   }
   const [ax, ay] = isoPt(xa, ya), [bx, by] = isoPt(xb, yb);
   const P = (u, z) => [ax + (bx - ax) * u, ay + (by - ay) * u - z];
+  hitAreas.set(id, [P(0, z1), P(1, z1), P(1, z0), P(0, z0)]);
   if (legs) {
     c.strokeStyle = '#4a2a12'; c.lineWidth = 3;
     for (const u of [.15, .85]) { const [lx, ly] = P(u, 0), [tx, ty] = P(u, z0 + 4); c.beginPath(); c.moveTo(lx, ly); c.lineTo(tx, ty); c.stroke(); }
@@ -1271,7 +1296,16 @@ function startVisitor() {
   h.classList.add('show');
   setTimeout(() => h.classList.remove('show'), 9000);
 }
+const openableAt = (sx, sy) => {
+  const id = exhibitAt(sx, sy);
+  return id && roomSeen(exById.get(id).room) ? id : null;
+};
+$('stage').addEventListener('pointermove', ev => {
+  if (ev.pointerType === 'mouse') $('stage').style.cursor = openableAt(ev.clientX, ev.clientY) ? 'pointer' : '';
+});
 $('stage').addEventListener('pointerup', ev => {
+  const exId = openableAt(ev.clientX, ev.clientY);
+  if (exId) { openCard(exId); return; } // everyone can open what they see on the walls
   if (role !== 'visitor' || !joined) return;
   // easter egg: poke the guide 5 times
   const [gx, gy] = ISO ? isoPt(S.guide.rx + .5, S.guide.ry + .5) : [(S.guide.rx + .5) * T, (S.guide.ry + .86) * T];
