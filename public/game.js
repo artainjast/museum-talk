@@ -523,7 +523,7 @@ function isoGround(now) {
       c.globalAlpha = 1;
     }
     const lt = light[blockRoomAt(x, y)] ?? 1;
-    if (lt < .995) { diamond(c, x, y); c.fillStyle = `rgba(11,10,16,${(1 - lt) * FOG_MAX})`; c.fill(); }
+    if (lt < .995) { diamond(c, x, y); c.fillStyle = c.strokeStyle = `rgba(11,10,16,${(1 - lt) * FOG_MAX})`; c.fill(); c.stroke(); }
   }
   for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) {
     const t = tileAt(x, y);
@@ -549,9 +549,9 @@ function isoGround(now) {
     else if (t === 'a') { c.fillStyle = 'rgba(34,184,200,.3)'; c.fill(); }
     else if (t === '=') { c.fillStyle = 'rgba(110,80,50,.18)'; c.fill(); }
     const lt = light[blockRoomAt(x, y)] ?? 1;
-    if (lt < .995) { c.fillStyle = `rgba(11,10,16,${(1 - lt) * FOG_MAX})`; c.fill(); }
+    if (lt < .995) { c.fillStyle = c.strokeStyle = `rgba(11,10,16,${(1 - lt) * FOG_MAX})`; c.fill(); c.stroke(); }
     const na = nightAlpha(x, y);
-    if (na > .01) { c.fillStyle = `rgba(6,10,35,${na})`; c.fill(); }
+    if (na > .01) { c.fillStyle = c.strokeStyle = `rgba(6,10,35,${na})`; c.fill(); c.stroke(); }
   }
   // vote zone borders
   c.setLineDash([8, 6]); c.lineWidth = 2;
